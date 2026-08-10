@@ -64,9 +64,14 @@ def main() -> int:
         "설정됨" if config.HF_TOKEN else ".env 에 HF_TOKEN 을 넣으세요",
     )
 
+    import warnings
+
     for module in ("whisperx", "pyannote.audio", "fastapi", "scipy"):
         try:
-            __import__(module)
+            with warnings.catch_warnings():
+                # torchcodec 경고는 무해하다. 우리는 파형을 직접 넘긴다.
+                warnings.filterwarnings("ignore", message=".*torchcodec.*")
+                __import__(module)
             ok &= check(f"import {module}", True)
         except ImportError as exc:
             ok &= check(f"import {module}", False, str(exc))

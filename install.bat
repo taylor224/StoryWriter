@@ -208,7 +208,11 @@ echo.
 echo [7/7] 설치 검증 중...
 python -c "import torch;print('      torch',torch.__version__,'/ CUDA',torch.cuda.is_available())"
 if errorlevel 1 goto verify_bad
-python -c "import whisperx,pyannote.audio;print('      whisperx / pyannote.audio import OK')"
+REM torchcodec warns at import time because winget's ffmpeg is a static build
+REM with no shared DLLs. Harmless: we hand pyannote a decoded waveform instead.
+python -W ignore::UserWarning -c "import whisperx,pyannote.audio;print('      whisperx / pyannote.audio import OK')"
+if errorlevel 1 goto verify_bad
+python -W ignore::UserWarning -c "import sys;sys.path.insert(0,'.');from app import diarize;print('      오디오 디코딩 경로 OK (torchcodec 우회)')"
 if errorlevel 1 goto verify_bad
 if not "%GPU_MODE%"=="NVIDIA" goto finish
 python -c "import sys,torch;sys.exit(0 if torch.cuda.is_available() else 1)"

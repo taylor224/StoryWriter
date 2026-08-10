@@ -44,12 +44,58 @@ def unload_pipeline() -> None:
     asr.free_vram()
 
 
+def load_waveform(wav_path: Path) -> dict[str, Any]:
+    """16kHz mono PCM wav 를 pyannote 가 받는 in-memory 형태로 읽는다.
+
+    pyannote 4.x 는 파일 경로를 주면 torchcodec 으로 디코딩하는데, torchcodec 은
+    FFmpeg 공유 라이브러리(avcodec/avformat DLL)를 요구한다. Windows 의 winget
+    ffmpeg 은 정적 빌드라 .exe 만 설치되어 DLL 로딩이 실패한다.
+
+    우리는 이미 ffmpeg CLI 로 16kHz mono 16bit wav 를 만들어 두므로, 표준
+    라이브러리로 직접 읽어 넘기면 torchcodec 경로를 아예 타지 않는다.
+    """
+    import wave
+
+    import torch
+
+    try:
+        with wave.open(str(wav_path), "rb") as handle:
+            channels = handle.getnchannels()
+            width = handle.getsampwidth()
+            rate = handle.getframerate()
+            frames = handle.readframes(handle.getnframes())
+    except wave.Error as exc:
+        raise RuntimeError(
+            f"16bit PCM wav 로 읽을 수 없습니다 ({wav_path.name}): {exc}. "
+            "audio.to_wav16k 를 거친 파일인지 확인하세요."
+        ) from exc
+
+    if width != 2:
+        raise RuntimeError(
+            f"16bit PCM wav 가 아닙니다 (sampwidth={width}). audio.to_wav16k 를 거쳤는지 확인하세요."
+        )
+
+    samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    if channels > 1:
+        samples = samples.reshape(-1, channels).mean(axis=1)
+
+    waveform = torch.from_numpy(np.ascontiguousarray(samples)).unsqueeze(0)
+    return {"waveform": waveform, "sample_rate": rate}
+
+
 def _build_pipeline():
     if not config.HF_TOKEN:
         raise DiarizationSetupError(GATE_HELP)
 
+    import warnings
+
     import torch
-    from pyannote.audio import Pipeline
+
+    # 파형을 직접 넘기므로 torchcodec 디코더는 쓰지 않는다.
+    # import 시점에 뜨는 "torchcodec is not installed correctly" 경고는 무해하다.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*torchcodec.*")
+        from pyannote.audio import Pipeline
 
     try:
         # pyannote 4.x 는 token=, 3.x 는 use_auth_token=
@@ -92,11 +138,14 @@ def diarize(
         if max_speakers:
             kwargs["max_speakers"] = int(max_speakers)
 
+    # 파일 경로 대신 파형을 직접 넘겨 torchcodec 디코딩 경로를 우회한다
+    audio_input: Any = load_waveform(wav_path)
+
     try:
-        output = pipeline(str(wav_path), return_embeddings=True, **kwargs)
+        output = pipeline(audio_input, return_embeddings=True, **kwargs)
     except TypeError:
         # return_embeddings 를 모르는 구버전 — 임베딩 없이 진행 (자동 인식만 비활성)
-        output = pipeline(str(wav_path), **kwargs)
+        output = pipeline(audio_input, **kwargs)
 
     if isinstance(output, tuple):
         annotation, raw_embeddings = output[0], output[1]

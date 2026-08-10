@@ -271,6 +271,7 @@ Mac 은 `large-v3-turbo` 를 권장한다. 단어오류율 차이가 평균 0.4%
 |---|---|
 | `No matching distribution found for whisperx` + `Requires-Python >=3.10,<3.14` 목록 | Python 3.14 를 쓰고 있다. [3.13](https://www.python.org/downloads/release/python-31314/) 설치 후 `.venv` 폴더를 지우고 `install.bat` 재실행 |
 | 설치는 됐는데 GPU 를 안 씀 | 최신 torch 가 whisperx 때문에 PyPI CPU 휠로 되돌려진 것. `pip install --force-reinstall torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128` |
+| `torchcodec is not installed correctly` / `Could not load libtorchcodec` | **무시해도 된다.** winget 의 ffmpeg 은 정적 빌드라 torchcodec 이 요구하는 공유 DLL 이 없다. 이 프로젝트는 pyannote 에 디코딩된 파형을 직접 넘기므로 torchcodec 을 타지 않는다 |
 | `Could not locate cudnn_ops64_9.dll` | torch 2.4 미만. CUDA 휠로 재설치 |
 | `torch.cuda.is_available()` 가 False | CPU 전용 휠이 깔림. `pip uninstall torch torchaudio` 후 CUDA 인덱스로 재설치 |
 | 화자 분리 모델 로드 실패 (401/403/None) | HF 토큰 누락 또는 모델 페이지 약관 미동의 |
