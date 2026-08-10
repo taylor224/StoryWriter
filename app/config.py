@@ -5,6 +5,7 @@ torch / huggingface 를 import 하기 전에 HF_HOME 을 설정해야 모델 캐
 """
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -53,6 +54,15 @@ os.environ.setdefault("HF_HOME", str(MODEL_CACHE))
 os.environ.setdefault("TORCH_HOME", str(MODEL_CACHE / "torch"))
 # 심볼릭 링크 경고 억제 (Windows 에서 개발자 모드 아니면 계속 뜸)
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+# Windows 는 관리자이거나 개발자 모드가 아니면 심볼릭 링크를 만들 수 없다.
+# huggingface_hub 는 캐시에서 blobs -> snapshots 를 심링크로 잇는데, 사전 감지가
+# 통과해도 실제 생성에서 WinError 1314 가 날 수 있다. 이때 나는 예외가
+# PermissionError 가 아니라 일반 OSError 라서 라이브러리의 복사 폴백이 동작하지
+# 않고 그대로 터진다. Windows 에서는 아예 심링크를 끄고 파일을 옮겨 저장한다.
+# (새로 받은 blob 은 복사가 아니라 이동이므로 용량이 두 배가 되지는 않는다.)
+if sys.platform.startswith("win"):
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 
 # ── 모델 ──────────────────────────────────────────────────────────────
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()

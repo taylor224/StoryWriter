@@ -55,6 +55,18 @@ def friendly_error(exc: BaseException) -> str:
             "  pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cu128\n\n"
             f"원본 오류: {text}"
         )
+    if "1314" in text or "심볼릭" in text or "symbolic link" in lowered:
+        return (
+            "모델 캐시를 만들다가 Windows 심볼릭 링크 권한에서 막혔습니다.\n"
+            "다음 순서로 해결하세요.\n\n"
+            "  1) models 폴더를 통째로 지우고 다시 실행하세요.\n"
+            "     최신 버전은 심링크를 쓰지 않도록 설정되어 있어 보통 이걸로 끝납니다.\n"
+            "  2) 그래도 나면 프로젝트를 바탕화면 대신 C:\\StoryWriter 처럼\n"
+            "     OneDrive 동기화가 걸리지 않는 경로로 옮기세요.\n"
+            "  3) 또는 Windows 설정 > 개인 정보 및 보안 > 개발자용 에서\n"
+            "     개발자 모드를 켜세요.\n\n"
+            f"원본 오류: {text}"
+        )
     if "401" in text or "403" in text or "gated" in lowered:
         return diarize.GATE_HELP + f"\n\n원본 오류: {text}"
     return f"{type(exc).__name__}: {text}"
