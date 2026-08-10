@@ -44,10 +44,11 @@ DATA_DIR = _path("DATA_DIR", BASE_DIR / "data")
 UPLOAD_DIR = DATA_DIR / "uploads"
 RESULT_DIR = DATA_DIR / "results"
 SAMPLE_DIR = DATA_DIR / "samples"
+CACHE_DIR = DATA_DIR / "cache"  # 단계별 중간 결과 (재시도 시 이어서 돌리기 위함)
 DB_PATH = DATA_DIR / "app.db"
 MODEL_CACHE = _path("MODEL_CACHE", BASE_DIR / "models")
 
-for _d in (DATA_DIR, UPLOAD_DIR, RESULT_DIR, SAMPLE_DIR, MODEL_CACHE):
+for _d in (DATA_DIR, UPLOAD_DIR, RESULT_DIR, SAMPLE_DIR, CACHE_DIR, MODEL_CACHE):
     _d.mkdir(parents=True, exist_ok=True)
 
 # torch/transformers import 전에 반드시 설정

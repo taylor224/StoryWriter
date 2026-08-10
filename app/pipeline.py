@@ -1,5 +1,9 @@
 """전사 → 정렬 → 화자 분리 → 화자 자동 인식 → 저장 전체 흐름.
 
+각 단계의 출력은 data/cache 에 남는다. 실패한 작업을 다시 돌리면 입력이 같은
+단계는 건너뛰고 실패한 지점부터 이어서 계산한다. 전사가 가장 비싼 단계라
+화자 분리에서 죽었다고 전사를 다시 돌리는 일은 없어야 한다.
+
 CLI 로도 쓸 수 있다:
     python -m app.pipeline 회의.mp3 --name 2026-08-10 --max-speakers 4
 """
@@ -11,7 +15,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from . import asr, audio, config, db, diarize, matching, render
+import numpy as np
+
+from . import asr, audio, cache, config, db, diarize, matching, render
 
 ProgressFn = Callable[[str, float], None]
 
@@ -45,42 +51,122 @@ def run(
     min_speakers: int | None = None,
     max_speakers: int | None = None,
     progress: ProgressFn = _noop,
+    resume: bool = True,
 ) -> dict[str, Any]:
     source = Path(source)
     name = render.sanitize_name(name)
     warnings: list[str] = []
+    reused: list[str] = []
 
-    # 1) 오디오 정규화 (16kHz mono wav)
+    def cached(stage: str, key: dict[str, Any]) -> dict[str, Any] | None:
+        return cache.load(name, stage, key) if resume else None
+
+    # ── 1) 오디오 정규화 (16kHz mono wav) ─────────────────────────────
     # 확장자가 .wav 여도 44.1kHz 스테레오일 수 있으므로 항상 변환한다.
     progress("오디오 변환", 5)
     wav_path = config.UPLOAD_DIR / f"{name}.16k.wav"
-    audio.to_wav16k(source, wav_path)
-    duration = audio.duration_sec(wav_path)
+    audio_key = cache.audio_key(source)
 
-    # 2) 전사
-    progress("음성 인식 중", 12)
-    waveform = asr.load_audio(wav_path)
+    hit = cached("audio", audio_key)
+    if hit and wav_path.exists():
+        duration = hit["duration"]
+        reused.append("오디오 변환")
+    else:
+        audio.to_wav16k(source, wav_path)
+        duration = audio.duration_sec(wav_path)
+        cache.save(name, "audio", audio_key, {"duration": duration})
+
+    # 파형은 전사와 정렬에서만 쓴다. 둘 다 캐시에 맞으면 읽지 않는다.
+    loaded: dict[str, Any] = {}
+
+    def waveform():
+        if "value" not in loaded:
+            loaded["value"] = asr.load_audio(wav_path)
+        return loaded["value"]
+
     prompt = initial_prompt if initial_prompt is not None else build_initial_prompt()
-    result = asr.transcribe(waveform, language=language or None, initial_prompt=prompt)
-    detected = result.get("language") or language or "unknown"
-    segments = result.get("segments") or []
 
-    # 3) 단어 단위 정렬
-    progress("단어 타임스탬프 정렬 중", 58)
-    segments, align_warning = asr.align(segments, detected, waveform)
-    if align_warning:
-        warnings.append(align_warning)
+    # ── 2) 전사 ─────────────────────────────────────────────────────
+    transcribe_key = {
+        "audio": audio_key,
+        "model": config.WHISPER_MODEL,
+        "language": language or "",
+        "prompt": prompt,
+    }
+    hit = cached("transcribe", transcribe_key)
+    if hit:
+        detected, segments = hit["language"], hit["segments"]
+        reused.append("음성 인식")
+        progress("음성 인식 결과 재사용", 58)
+    else:
+        progress("음성 인식 중", 12)
+        result = asr.transcribe(
+            waveform(), language=language or None, initial_prompt=prompt
+        )
+        detected = result.get("language") or language or "unknown"
+        segments = result.get("segments") or []
+        cache.save(
+            name, "transcribe", transcribe_key,
+            {"language": detected, "segments": segments},
+        )
+
+    # ── 3) 단어 단위 정렬 ────────────────────────────────────────────
+    align_key = {"transcribe": transcribe_key, "language": detected}
+    hit = cached("align", align_key)
+    if hit:
+        segments = hit["segments"]
+        if hit.get("warning"):
+            warnings.append(hit["warning"])
+        reused.append("단어 정렬")
+        progress("단어 정렬 결과 재사용", 70)
+    else:
+        progress("단어 타임스탬프 정렬 중", 58)
+        segments, align_warning = asr.align(segments, detected, waveform())
+        if align_warning:
+            warnings.append(align_warning)
+        cache.save(
+            name, "align", align_key,
+            {"segments": segments, "warning": align_warning},
+        )
+
     if config.UNLOAD_BETWEEN_STAGES:
         asr.unload_model()
         asr.unload_align_models()
+    loaded.pop("value", None)  # 파형은 여기까지만 필요하다
 
-    # 4) 화자 분리 + 임베딩
-    progress("화자 분리 중", 72)
-    turns, embeddings, speech_sec = diarize.diarize(
-        wav_path, min_speakers=min_speakers, max_speakers=max_speakers
-    )
-    if config.UNLOAD_BETWEEN_STAGES:
-        diarize.unload_pipeline()
+    # ── 4) 화자 분리 + 임베딩 ────────────────────────────────────────
+    diarize_key = {
+        "audio": audio_key,
+        "model": config.DIARIZE_MODEL,
+        "min_speakers": min_speakers,
+        "max_speakers": max_speakers,
+    }
+    hit = cached("diarize", diarize_key)
+    if hit:
+        turns = hit["turns"]
+        embeddings = {
+            label: np.asarray(vector, dtype=np.float32)
+            for label, vector in hit["embeddings"].items()
+        }
+        speech_sec = hit["speech_sec"]
+        reused.append("화자 분리")
+        progress("화자 분리 결과 재사용", 88)
+    else:
+        progress("화자 분리 중", 72)
+        turns, embeddings, speech_sec = diarize.diarize(
+            wav_path, min_speakers=min_speakers, max_speakers=max_speakers
+        )
+        cache.save(
+            name, "diarize", diarize_key,
+            {
+                "turns": turns,
+                "embeddings": {k: v.tolist() for k, v in embeddings.items()},
+                "speech_sec": speech_sec,
+            },
+        )
+        if config.UNLOAD_BETWEEN_STAGES:
+            diarize.unload_pipeline()
+
     if not turns:
         warnings.append("화자 구간을 찾지 못했습니다. 전체를 한 명으로 처리합니다.")
     if not embeddings:
@@ -88,12 +174,14 @@ def run(
             "화자 임베딩을 얻지 못해 이번 결과는 자동 화자 인식을 건너뜁니다."
         )
 
-    # 5) 세그먼트에 화자 붙이기 (화자 바뀌는 지점에서 분할)
-    progress("화자 배정 중", 88)
+    # ── 5) 세그먼트에 화자 붙이기 (화자 바뀌는 지점에서 분할) ─────────
+    # 여기부터는 싼 단계라 캐시하지 않는다. 등록된 화자가 바뀌었을 수 있으므로
+    # 재시도할 때마다 다시 대조하는 편이 오히려 맞다.
+    progress("화자 배정 중", 92)
     segments = diarize.attach_speakers(segments, turns)
 
-    # 6) 등록된 화자와 대조
-    progress("등록 화자 대조 중", 93)
+    # ── 6) 등록된 화자와 대조 ────────────────────────────────────────
+    progress("등록 화자 대조 중", 95)
     matches = matching.match(embeddings, speech_sec)
     ordered = render.order_labels(segments, speech_sec)
     displays, anon = render.assign_displays(ordered, matches)
@@ -114,8 +202,8 @@ def run(
             "embedding": db.normalize(vector).tolist() if vector is not None else None,
         }
 
-    # 7) 저장
-    progress("저장 중", 97)
+    # ── 7) 저장 ─────────────────────────────────────────────────────
+    progress("저장 중", 98)
     payload: dict[str, Any] = {
         "name": name,
         "source_file": source.name,
@@ -125,6 +213,7 @@ def run(
         "language": detected,
         "initial_prompt": prompt,
         "warnings": warnings,
+        "reused_stages": reused,
         "speakers": speakers,
         "segments": [
             {
@@ -151,6 +240,7 @@ def run(
     payload["txt_file"] = str(txt_file)
     payload["json_file"] = str(json_file)
 
+    cache.clear(name)  # 성공했으니 중간 결과는 필요 없다
     progress("완료", 100)
     return payload
 
@@ -163,6 +253,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prompt", default=None, help="initial_prompt 직접 지정")
     parser.add_argument("--min-speakers", type=int, default=None)
     parser.add_argument("--max-speakers", type=int, default=None)
+    parser.add_argument(
+        "--no-resume", action="store_true", help="중간 결과 캐시를 무시하고 처음부터"
+    )
     args = parser.parse_args(argv)
 
     if not args.audio.exists():
@@ -170,7 +263,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     db.init()
-    name = render.unique_name(args.name or render.default_name())
+    name = render.sanitize_name(args.name or render.default_name())
+    if not cache.stages(name) and render.json_path(name).exists():
+        name = render.unique_name(name)
 
     staged = config.UPLOAD_DIR / f"{name}{args.audio.suffix.lower()}"
     if staged.resolve() != args.audio.resolve():
@@ -187,11 +282,14 @@ def main(argv: list[str] | None = None) -> int:
         min_speakers=args.min_speakers,
         max_speakers=args.max_speakers,
         progress=show,
+        resume=not args.no_resume,
     )
 
     print()
     for warning in payload.get("warnings", []):
         print(f"[경고] {warning}")
+    if payload.get("reused_stages"):
+        print(f"재사용한 단계: {', '.join(payload['reused_stages'])}")
     print(f"언어: {payload['language']}   길이: {payload['duration']:.1f}초")
     print(f"저장: {payload['txt_file']}")
     print(f"      {payload['json_file']}")

@@ -131,6 +131,14 @@ function initIndex() {
 
 let lastActiveCount = 0;
 
+// 재시도 시 건너뛸 수 있는 단계 이름
+const STAGE_NAMES = {
+  audio: "오디오 변환",
+  transcribe: "음성 인식",
+  align: "단어 정렬",
+  diarize: "화자 분리",
+};
+
 async function refreshJobs() {
   const container = $("#jobs");
   if (!container) return;
@@ -160,15 +168,47 @@ async function refreshJobs() {
       const error = job.error
         ? `<div class="job-error">${esc(job.error)}</div>`
         : "";
+
+      let retry = "";
+      if (job.status === "error") {
+        const kept = (job.cached_stages || []).map((s) => STAGE_NAMES[s] || s);
+        const hint = kept.length
+          ? `${kept.join(" · ")} 재사용`
+          : "처음부터";
+        retry = `<button data-retry="${job.id}" title="${esc(hint)}">이어서 재시도</button>
+                 <span class="job-stage">${esc(hint)}</span>`;
+      }
+
       return `<div class="job">
         <span class="job-name">${esc(job.name)}</span>
         <span class="status ${cls}">${label}</span>
         <span class="job-stage">${esc(job.stage || "")}</span>
         <span class="bar"><i style="width:${Math.round(job.progress || 0)}%"></i></span>
-        ${link}${error}
+        ${link}${retry}${error}
       </div>`;
     })
     .join("");
+
+  container.querySelectorAll("[data-retry]").forEach((button) =>
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        const result = await api(`/api/jobs/${button.dataset.retry}/retry`, {
+          method: "POST",
+        });
+        const kept = (result.resumed_from || []).map((s) => STAGE_NAMES[s] || s);
+        toast(
+          kept.length
+            ? `재시도 시작. ${kept.join(" · ")} 단계는 다시 계산하지 않습니다.`
+            : "재시도 시작."
+        );
+        refreshJobs();
+      } catch (error) {
+        toast(`재시도 실패: ${error.message}`, 8000);
+        button.disabled = false;
+      }
+    })
+  );
 
   const active = jobs.filter((job) => job.status === "queued" || job.status === "running").length;
   if (active === 0 && lastActiveCount > 0) refreshResults();

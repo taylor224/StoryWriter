@@ -1,5 +1,6 @@
 """FastAPI 앱: 업로드 / 결과 / 화자 관리."""
 
+import json
 import shutil
 import threading
 from contextlib import asynccontextmanager
@@ -11,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import audio, config, db, diarize, jobs, matching, pipeline, render
+from . import audio, cache, config, db, diarize, jobs, matching, pipeline, render
 
 BASE = Path(__file__).resolve().parent
 
@@ -124,15 +125,50 @@ async def api_create_job(
         "initial_prompt": pipeline.build_initial_prompt(initial_prompt),
         "min_speakers": _opt_int(min_speakers),
         "max_speakers": _opt_int(max_speakers),
+        "source": str(staged),  # 재시도할 때 원본을 다시 찾기 위해 남긴다
     }
     job_id = db.create_job(result_name, file.filename or staged.name, params)
     jobs.submit(job_id, staged, params)
     return {"job_id": job_id, "name": result_name, "queued": jobs.pending()}
 
 
+@app.post("/api/jobs/{job_id}/retry")
+def api_retry_job(job_id: int):
+    """실패한 작업을 이어서 다시 돌린다. 입력이 같은 단계는 캐시를 재사용한다."""
+    job = db.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "작업을 찾을 수 없습니다.")
+    if job["status"] in ("queued", "running"):
+        raise HTTPException(409, "이미 대기 중이거나 진행 중인 작업입니다.")
+
+    try:
+        params = json.loads(job["params"] or "{}")
+    except json.JSONDecodeError:
+        params = {}
+
+    source = Path(params.get("source") or "")
+    if not source.exists():
+        raise HTTPException(
+            400, "원본 오디오가 남아 있지 않습니다. 파일을 다시 업로드해 주세요."
+        )
+
+    done = cache.stages(job["name"])
+    db.update_job(
+        job_id, status="queued", stage="대기 중", progress=0, error="", finished_at=""
+    )
+    jobs.submit(job_id, source, params)
+    return {"ok": True, "job_id": job_id, "resumed_from": done}
+
+
 @app.get("/api/jobs")
 def api_list_jobs(limit: int = 30):
-    return {"jobs": db.list_jobs(limit), "running": jobs.current_job_id()}
+    rows = db.list_jobs(limit)
+    for row in rows:
+        # 실패한 작업이 어디까지 남아 있는지 UI 에서 알려 주기 위함
+        row["cached_stages"] = (
+            cache.stages(row["name"]) if row["status"] == "error" else []
+        )
+    return {"jobs": rows, "running": jobs.current_job_id()}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -140,6 +176,7 @@ def api_get_job(job_id: int):
     job = db.get_job(job_id)
     if job is None:
         raise HTTPException(404, "작업을 찾을 수 없습니다.")
+    job["cached_stages"] = cache.stages(job["name"])
     return job
 
 
