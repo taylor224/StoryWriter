@@ -1,0 +1,6 @@
+# 배치 파일은 CRLF 여야 cmd.exe 가 안정적으로 동작한다
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.sh  text eol=lf

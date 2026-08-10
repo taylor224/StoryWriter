@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block page %}speakers{% endblock %}
+{% block title %}화자 관리 · 화자 구분 음성 기록기{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h2>화자 추가</h2>
+  <p class="muted">이름만 먼저 만들고 샘플 음성을 올리거나, 전사 결과 화면에서 이름을 지정해도 자동으로 등록됩니다.</p>
+  <form id="new-speaker" class="inline-form">
+    <input type="text" id="new-name" placeholder="이름 (예: 안차돌)" required>
+    <button type="submit" class="primary">추가</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>등록된 화자</h2>
+  <div id="speaker-list"><p class="muted">불러오는 중…</p></div>
+</section>
+{% endblock %}

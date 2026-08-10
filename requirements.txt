@@ -1,0 +1,15 @@
+# PyTorch는 반드시 CUDA 휠로 먼저 설치할 것 (이 파일에 포함하지 않음):
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+# torch >= 2.4 필수 (그 미만은 Windows에서 cudnn_ops64_9.dll 로드 실패)
+
+whisperx>=3.8.6
+pyannote.audio>=4.0.0
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+jinja2>=3.1.0
+python-dotenv>=1.0.0
+
+numpy>=1.26.0
+scipy>=1.11.0
