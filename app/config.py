@@ -6,6 +6,7 @@ torch / huggingface 를 import 하기 전에 HF_HOME 을 설정해야 모델 캐
 
 import os
 import sys
+import warnings
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -63,6 +64,14 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 # (새로 받은 blob 은 복사가 아니라 이동이므로 용량이 두 배가 되지는 않는다.)
 if sys.platform.startswith("win"):
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
+
+# pyannote 는 import 시점에 torchcodec 로딩 실패를 경고한다. 이 프로젝트는
+# 디코딩된 파형을 직접 넘기므로(diarize.load_waveform) 해당 경로를 타지 않는다.
+# whisperx 도 VAD 때문에 pyannote 를 import 하므로 필터는 여기 있어야 걸린다.
+# 메시지가 개행으로 시작해서 (?s) 없이는 정규식이 매칭되지 않는다.
+warnings.filterwarnings(
+    "ignore", message=r"(?s).*torchcodec is not installed correctly.*"
+)
 
 # ── 모델 ──────────────────────────────────────────────────────────────
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()

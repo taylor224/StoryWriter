@@ -87,15 +87,10 @@ def _build_pipeline():
     if not config.HF_TOKEN:
         raise DiarizationSetupError(GATE_HELP)
 
-    import warnings
-
     import torch
 
-    # 파형을 직접 넘기므로 torchcodec 디코더는 쓰지 않는다.
-    # import 시점에 뜨는 "torchcodec is not installed correctly" 경고는 무해하다.
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*torchcodec.*")
-        from pyannote.audio import Pipeline
+    # torchcodec 경고는 config 에서 이미 걸러진다. 파형을 직접 넘기므로 무해하다.
+    from pyannote.audio import Pipeline
 
     try:
         # pyannote 4.x 는 token=, 3.x 는 use_auth_token=
