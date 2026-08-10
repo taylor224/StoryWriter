@@ -135,43 +135,72 @@ def diarize(
 
     # 파일 경로 대신 파형을 직접 넘겨 torchcodec 디코딩 경로를 우회한다
     audio_input: Any = load_waveform(wav_path)
+    full, exclusive, raw_embeddings = _apply(pipeline, audio_input, kwargs)
 
-    try:
-        output = pipeline(audio_input, return_embeddings=True, **kwargs)
-    except TypeError:
-        # return_embeddings 를 모르는 구버전 — 임베딩 없이 진행 (자동 인식만 비활성)
-        output = pipeline(audio_input, **kwargs)
-
-    if isinstance(output, tuple):
-        annotation, raw_embeddings = output[0], output[1]
-    else:
-        annotation, raw_embeddings = output, None
-
+    # 단어에 화자를 붙일 때는 겹침이 제거된 쪽을 쓴다. 겹치는 구간에서는 어차피
+    # 한 명만 배정할 수 있으므로, pyannote 가 전사 매칭용으로 만들어 둔 결과가 맞다.
     turns = [
         {"start": float(seg.start), "end": float(seg.end), "speaker": str(label)}
-        for seg, _, label in annotation.itertracks(yield_label=True)
+        for seg, _, label in (exclusive or full).itertracks(yield_label=True)
     ]
     turns.sort(key=lambda t: (t["start"], t["end"]))
 
+    # 발화 시간은 겹침을 포함한 원본 기준이어야 실제로 얼마나 말했는지에 가깝다.
+    # 임베딩을 믿을 만한지 판단하는 데 쓰이므로 이쪽이 맞다.
     speech: dict[str, float] = {}
-    for turn in turns:
-        speech[turn["speaker"]] = speech.get(turn["speaker"], 0.0) + (
-            turn["end"] - turn["start"]
-        )
+    for seg, _, label in full.itertracks(yield_label=True):
+        key = str(label)
+        speech[key] = speech.get(key, 0.0) + float(seg.end - seg.start)
 
     embeddings: dict[str, np.ndarray] = {}
     if raw_embeddings is not None:
-        labels = list(annotation.labels())
         arr = np.asarray(raw_embeddings)
-        for idx, label in enumerate(labels):
+        # 임베딩 순서는 speaker_diarization.labels() 순서다 (exclusive 가 아님)
+        for idx, label in enumerate(full.labels()):
             if idx >= arr.shape[0]:
                 break
             vec = np.asarray(arr[idx], dtype=np.float32).ravel()
-            # 겹침 구간만 있는 화자는 임베딩이 NaN 으로 나올 수 있다
-            if vec.size and np.isfinite(vec).all():
+            # 겹침만 있는 화자는 NaN 이 나오고, 화자 수가 모자라면 0 으로 패딩된다.
+            # 둘 다 대조에 쓸 수 없는 값이라 버린다.
+            if vec.size and np.isfinite(vec).all() and vec.any():
                 embeddings[str(label)] = vec
 
     return turns, embeddings, speech
+
+
+def _apply(pipeline, audio_input: Any, kwargs: dict[str, Any]):
+    """pyannote 버전별 반환 형태를 (원본, 겹침제거, 임베딩) 으로 통일한다.
+
+    4.x  : DiarizeOutput(speaker_diarization, exclusive_speaker_diarization,
+           speaker_embeddings). 임베딩이 항상 들어 있고 return_embeddings 인자는
+           없다. 넘기면 "Ignoring unexpected keyword arguments" 경고만 난다.
+    3.x  : return_embeddings=True 를 주면 (Annotation, ndarray) 튜플.
+    legacy: Annotation 하나만.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(pipeline.apply).parameters
+    except (TypeError, ValueError):
+        params = {}
+
+    if "return_embeddings" in params:  # pyannote 3.x
+        output = pipeline(audio_input, return_embeddings=True, **kwargs)
+    else:  # pyannote 4.x 이상
+        output = pipeline(audio_input, **kwargs)
+
+    full = getattr(output, "speaker_diarization", None)
+    if full is not None:  # DiarizeOutput
+        return (
+            full,
+            getattr(output, "exclusive_speaker_diarization", None),
+            getattr(output, "speaker_embeddings", None),
+        )
+
+    if isinstance(output, tuple):  # (Annotation, embeddings)
+        return output[0], None, output[1]
+
+    return output, None, None  # Annotation 하나만
 
 
 # ── 단어/세그먼트에 화자 붙이기 ─────────────────────────────────────────
