@@ -22,8 +22,10 @@
 
 `run.bat` 을 먼저 눌러도 된다. 설치가 안 돼 있으면 알아서 `install.bat` 을 부른다.
 
-> 사전 준비: [Python 3.11](https://www.python.org/downloads/) 설치 시
-> **"Add python.exe to PATH" 체크**. 이것만 놓치면 설치가 실패한다.
+> **⚠️ Python 은 반드시 [3.13](https://www.python.org/downloads/release/python-31314/) 을 받을 것.**
+> python.org 첫 화면의 최신 버전은 **3.14 인데 whisperx 가 아직 지원하지 않는다.**
+> 설치 화면 맨 아래 **"Add python.exe to PATH" 체크**도 잊지 말 것.
+> (3.14 가 이미 깔려 있어도 지울 필요 없다. `install.bat` 이 `py` 런처로 3.13 을 찾아 쓴다.)
 >
 > 화자 구분에는 무료 Hugging Face 토큰이 필요하다 —
 > [토큰 생성](https://hf.co/settings/tokens) 후
@@ -55,8 +57,8 @@ SQLite 에 쌓아두고, 새 파일의 화자 임베딩과 코사인 유사도�
 ### 1. 사전 준비
 
 ```powershell
-# Python 3.11 권장 (WhisperX 는 3.10 이상 필요)
-python --version
+# Python 3.13 필요. 3.14 는 whisperx 가 아직 지원하지 않는다.
+py -3.13 --version
 
 # ffmpeg
 winget install Gyan.FFmpeg
@@ -68,11 +70,12 @@ ffmpeg -version
 
 ```powershell
 cd C:\dev\whisper
-python -m venv .venv
+py -3.13 -m venv .venv
 .venv\Scripts\activate
 
-# PyTorch 는 반드시 CUDA 휠로 먼저. torch 2.4 미만은 cudnn_ops64_9.dll 오류가 난다.
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+# PyTorch 는 버전을 고정해서 CUDA 인덱스로 먼저 설치한다. 이유는 아래 표 참고.
+pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 `
+    --index-url https://download.pytorch.org/whl/cu128
 
 pip install -r requirements.txt
 ```
@@ -122,11 +125,11 @@ run.bat
 | 단어 정렬 (wav2vec2) | 가능 | `DEVICE=mps` 시 GPU |
 
 ```bash
-brew install ffmpeg
+brew install ffmpeg python@3.13       # 3.14 는 whisperx 미지원
 
-python3 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
-pip install torch torchaudio          # CUDA 인덱스 없이 그냥 설치
+pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0   # CUDA 인덱스 없이
 pip install -r requirements.txt
 
 cp .env.example .env                  # HF_TOKEN 채우기
@@ -199,6 +202,31 @@ pyannote 의 MPS 커널이 불완전해 **타임스탬프가 어긋난 사례**�
 
 ---
 
+## 버전 고정 이유
+
+전부 최신을 쓰지는 **못한다.** whisperx 가 상한을 정한다. (기준일 2026-08-10)
+
+| 패키지 | 최신 | 이 프로젝트 | 왜 |
+|---|---|---|---|
+| Python | 3.14.7 | **3.13** | whisperx 가 `<3.14` 요구 |
+| torch / torchaudio | 2.13.0 | **2.8.0** | whisperx 가 `~=2.8.0` 요구 |
+| torchvision | 0.26.0 | **0.23.0** | whisperx 가 `~=0.23.0` 요구 |
+| torchcodec | 0.15.0 | **0.7.x** | whisperx `<0.8` ∩ pyannote `>=0.7`. torch 2.8 과 ABI 가 맞는 범위이기도 하다 |
+| whisperx | 3.8.6 | 3.8.6 | ✅ 최신 |
+| pyannote.audio | 4.0.7 | 4.0.7 | ✅ 최신 |
+| ctranslate2 | 4.8.1 | 최신 | ✅ 자동 |
+| faster-whisper | 1.2.1 | 최신 | ✅ 자동 |
+| fastapi / uvicorn | 0.141.1 / 0.52.1 | 최신 | ✅ 자동 |
+| numpy / scipy | 2.5.2 / 1.18.0 | 최신 | ✅ 자동 |
+
+**torch 버전 고정이 특히 중요하다.** 최신 torch 를 먼저 깔면, 뒤이어 whisperx 를
+설치할 때 pip 이 `torch~=2.8.0` 을 맞추려고 torch 를 되돌린다. 이때 CUDA 인덱스가
+아니라 PyPI 기본 인덱스에서 받으므로 Windows 에서는 **CPU 전용 휠(230MB)** 이 깔린다.
+설치는 성공한 것처럼 보이지만 GPU 를 전혀 쓰지 못한다.
+`install.bat` 은 마지막 단계에서 `torch.cuda.is_available()` 로 이 상황을 검사한다.
+
+---
+
 ## 튜닝
 
 `.env` 에서 조정한다.
@@ -241,6 +269,8 @@ Mac 은 `large-v3-turbo` 를 권장한다. 단어오류율 차이가 평균 0.4%
 
 | 증상 | 원인 / 해결 |
 |---|---|
+| `No matching distribution found for whisperx` + `Requires-Python >=3.10,<3.14` 목록 | Python 3.14 를 쓰고 있다. [3.13](https://www.python.org/downloads/release/python-31314/) 설치 후 `.venv` 폴더를 지우고 `install.bat` 재실행 |
+| 설치는 됐는데 GPU 를 안 씀 | 최신 torch 가 whisperx 때문에 PyPI CPU 휠로 되돌려진 것. `pip install --force-reinstall torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128` |
 | `Could not locate cudnn_ops64_9.dll` | torch 2.4 미만. CUDA 휠로 재설치 |
 | `torch.cuda.is_available()` 가 False | CPU 전용 휠이 깔림. `pip uninstall torch torchaudio` 후 CUDA 인덱스로 재설치 |
 | 화자 분리 모델 로드 실패 (401/403/None) | HF 토큰 누락 또는 모델 페이지 약관 미동의 |
