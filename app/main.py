@@ -93,6 +93,7 @@ async def api_create_job(
     name: str = Form(""),
     language: str = Form(""),
     initial_prompt: str | None = Form(None),
+    use_prompt: str = Form("1"),
     min_speakers: str = Form(""),
     max_speakers: str = Form(""),
 ):
@@ -120,9 +121,14 @@ async def api_create_job(
     if initial_prompt is not None:
         db.set_setting(pipeline.GLOSSARY_KEY, initial_prompt.strip())
 
+    # 끄면 참석자 이름과 용어사전을 Whisper 에 아예 넘기지 않는다.
+    # 배치 방식이라 프롬프트가 모든 구간에 반복 적용되어 새어 나올 수 있다.
+    wants_prompt = use_prompt.strip().lower() not in ("0", "false", "off", "")
     params = {
         "language": language.strip(),
-        "initial_prompt": pipeline.build_initial_prompt(initial_prompt),
+        "initial_prompt": (
+            pipeline.build_initial_prompt(initial_prompt) if wants_prompt else ""
+        ),
         "min_speakers": _opt_int(min_speakers),
         "max_speakers": _opt_int(max_speakers),
         "source": str(staged),  # 재시도할 때 원본을 다시 찾기 위해 남긴다

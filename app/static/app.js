@@ -107,6 +107,7 @@ function initIndex() {
     form.append("name", $("#name").value.trim());
     form.append("language", $("#language").value);
     form.append("initial_prompt", $("#initial_prompt").value);
+    form.append("use_prompt", $("#use_prompt").checked ? "1" : "0");
     form.append("min_speakers", $("#min_speakers").value);
     form.append("max_speakers", $("#max_speakers").value);
 
@@ -262,9 +263,13 @@ async function initResult() {
   const name = document.body.dataset.name;
   resultData = await api(`/api/results/${encodeURIComponent(name)}`);
 
+  const detection = resultData.language_detection || {};
+  const lang = detection.auto
+    ? `언어 ${resultData.language} (자동 감지, 확신도 ${detection.confidence ?? "?"})`
+    : `언어 ${resultData.language} (고정)`;
   $("#result-meta").textContent =
     `${(resultData.created_at || "").replace("T", " ")} · ${hhmmss(resultData.duration)} · ` +
-    `언어 ${resultData.language} · 원본 ${resultData.source_file}`;
+    `${lang} · 원본 ${resultData.source_file}`;
 
   const warnings = $("#warnings");
   warnings.innerHTML = (resultData.warnings || [])

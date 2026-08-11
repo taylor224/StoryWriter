@@ -77,24 +77,100 @@ def _apply_initial_prompt(model, prompt: str | None) -> None:
         pass
 
 
+SAMPLE_RATE = 16000
+LANG_WINDOWS = 5
+LANG_SILENCE_RMS = 0.005
+
+
+def _detect_window(model, chunk) -> tuple[str, float]:
+    from whisperx.audio import N_SAMPLES, log_mel_spectrogram
+
+    n_mels = model.model.feat_kwargs.get("feature_size") or 80
+    padding = 0 if chunk.shape[0] >= N_SAMPLES else N_SAMPLES - chunk.shape[0]
+    segment = log_mel_spectrogram(chunk[:N_SAMPLES], n_mels=n_mels, padding=padding)
+    encoded = model.model.encode(segment)
+    token, probability = model.model.model.detect_language(encoded)[0][0]
+    return token[2:-2], float(probability)
+
+
+def detect_language(audio) -> tuple[str, float, dict[str, float]]:
+    """오디오 여러 지점을 표본으로 언어를 정한다.
+
+    whisperx 기본 감지는 첫 30초만 본다(asr.py 의 audio[: N_SAMPLES]). 녹음
+    시작이 침묵이거나 짧은 영어 인사말이면 파일 전체가 엉뚱한 언어로 강제
+    디코딩되고, Whisper 는 하지도 않은 말을 그럴듯하게 지어낸다.
+
+    반환: (언어, 확신도 0~1, 언어별 득표)
+    """
+    import numpy as np
+    from whisperx.audio import N_SAMPLES
+
+    model = get_model()
+    total = int(audio.shape[0])
+
+    if total <= N_SAMPLES:
+        starts = [0]
+    else:
+        # 앞뒤 끝을 피해 고르게 표본을 잡는다
+        span = total - N_SAMPLES
+        starts = [
+            int(span * ratio)
+            for ratio in np.linspace(0.05, 0.95, min(LANG_WINDOWS, max(1, span // N_SAMPLES + 1)))
+        ]
+
+    votes: dict[str, float] = {}
+    counted = 0
+    for start in starts:
+        chunk = audio[start : start + N_SAMPLES]
+        if chunk.shape[0] < SAMPLE_RATE:
+            continue
+        # 거의 무음인 구간은 감지가 제멋대로다. 이런 표본이 전체를 망친다.
+        if float(np.sqrt(np.mean(np.square(chunk)))) < LANG_SILENCE_RMS:
+            continue
+        language, probability = _detect_window(model, chunk)
+        votes[language] = votes.get(language, 0.0) + probability
+        counted += 1
+
+    if not votes:  # 전부 무음으로 걸러진 경우 — 원래 방식으로 한 번
+        language, probability = _detect_window(model, audio)
+        return language, probability, {language: probability}
+
+    best = max(votes, key=votes.get)
+    confidence = votes[best] / max(1, counted)
+    return best, round(confidence, 3), {k: round(v, 3) for k, v in votes.items()}
+
+
 def transcribe(audio, language: str | None = None, initial_prompt: str | None = None) -> dict:
-    """{'segments': [...], 'language': 'ko'} 반환. language=None 이면 자동 감지."""
+    """{'segments': [...], 'language': 'ko', ...} 반환. language=None 이면 자동 감지."""
     model = get_model()
     _apply_initial_prompt(model, initial_prompt)
 
-    kwargs: dict[str, Any] = {"batch_size": max(1, config.BATCH_SIZE)}
-    if language:
-        kwargs["language"] = language
+    detection: dict[str, Any] = {}
+    if not language:
+        language, confidence, votes = detect_language(audio)
+        detection = {"auto": True, "confidence": confidence, "votes": votes}
+
+    # 언어를 항상 명시해서 넘긴다. whisperx 는 토크나이저를 모델 인스턴스에
+    # 캐시해 두고, language 를 안 주면 직전 파일의 언어를 그대로 재사용한다.
+    # 모델을 상주시키는 구조에서는 두 번째 파일부터 조용히 틀어진다.
+    kwargs: dict[str, Any] = {
+        "batch_size": max(1, config.BATCH_SIZE),
+        "language": language,
+    }
 
     try:
-        return model.transcribe(audio, **kwargs)
+        result = model.transcribe(audio, **kwargs)
     except RuntimeError as exc:
         if "out of memory" not in str(exc).lower() or kwargs["batch_size"] <= 1:
             raise
         # OOM 이면 배치를 반으로 줄여 한 번 더
         free_vram()
         kwargs["batch_size"] = max(1, kwargs["batch_size"] // 2)
-        return model.transcribe(audio, **kwargs)
+        result = model.transcribe(audio, **kwargs)
+
+    result.setdefault("language", language)
+    result["detection"] = detection
+    return result
 
 
 # ── 강제 정렬 (단어 단위 타임스탬프) ────────────────────────────────────

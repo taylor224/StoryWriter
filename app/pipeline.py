@@ -96,6 +96,7 @@ def run(
     hit = cached("transcribe", transcribe_key)
     if hit:
         detected, segments = hit["language"], hit["segments"]
+        detection = hit.get("detection") or {}
         reused.append("음성 인식")
         progress("음성 인식 결과 재사용", 58)
     else:
@@ -105,10 +106,24 @@ def run(
         )
         detected = result.get("language") or language or "unknown"
         segments = result.get("segments") or []
+        detection = result.get("detection") or {}
         cache.save(
             name, "transcribe", transcribe_key,
-            {"language": detected, "segments": segments},
+            {"language": detected, "segments": segments, "detection": detection},
         )
+
+    # 언어를 잘못 잡으면 Whisper 는 하지도 않은 말을 그럴듯하게 지어낸다.
+    # 조용히 넘어가면 원인을 못 찾으므로 판정 근거를 결과에 남긴다.
+    if detection.get("auto"):
+        votes = detection.get("votes") or {}
+        confidence = detection.get("confidence", 0.0)
+        if confidence < 0.9 or len(votes) > 1:
+            tally = ", ".join(f"{k} {v}" for k, v in sorted(votes.items(), key=lambda x: -x[1]))
+            warnings.append(
+                f"언어를 '{detected}' 로 자동 감지했습니다 (확신도 {confidence}). "
+                f"표본별 득표: {tally}. "
+                "결과에 하지 않은 말이 섞여 있으면 언어를 고정하고 다시 돌리세요."
+            )
 
     # ── 3) 단어 단위 정렬 ────────────────────────────────────────────
     align_key = {"transcribe": transcribe_key, "language": detected}
@@ -211,6 +226,7 @@ def run(
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "duration": round(duration, 2),
         "language": detected,
+        "language_detection": detection,
         "initial_prompt": prompt,
         "warnings": warnings,
         "reused_stages": reused,
