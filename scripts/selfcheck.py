@@ -323,6 +323,49 @@ single = stitch.merge([parts[0]])
 check("조각이 하나면 라벨을 그대로 둔다",
       [t["speaker"] for t in single[0]] == ["SPEAKER_00", "SPEAKER_01"], str(single[0]))
 
+# pyannote 는 겹침만 있는 화자의 임베딩을 NaN 으로 내놓고 diarize 가 버린다.
+# 그러면 "발화 시간은 있는데 목소리는 모르는" 라벨이 생긴다. 이게 조각 목록에
+# 섞인 채 다음 조각과 대조하다가 터졌었다 (max() on empty).
+voiceless = [
+    ([{"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00"}],
+     {},                                   # 임베딩이 하나도 없는 조각
+     {"SPEAKER_00": 4.0}),
+    ([{"start": 10.0, "end": 15.0, "speaker": "SPEAKER_00"},
+      {"start": 15.0, "end": 18.0, "speaker": "SPEAKER_01"}],
+     {"SPEAKER_00": voice(0)},             # 한쪽만 임베딩이 있는 조각
+     {"SPEAKER_00": 5.0, "SPEAKER_01": 3.0}),
+    ([{"start": 20.0, "end": 26.0, "speaker": "SPEAKER_00"}],
+     {"SPEAKER_00": voice(0)},             # 위와 같은 사람
+     {"SPEAKER_00": 6.0}),
+]
+try:
+    v_turns, v_emb, v_speech, _ = stitch.merge(voiceless)
+    check("임베딩 없는 화자가 섞여도 죽지 않는다", True)
+    # 목소리 모르는 둘은 각각 따로 남고(4.0, 3.0), voice(0) 둘만 합쳐진다(5+6=11)
+    check("임베딩 없는 화자는 아무와도 합쳐지지 않는다",
+          sorted(round(v, 1) for v in v_speech.values()) == [3.0, 4.0, 11.0],
+          f"{len(v_speech)}명 {sorted(round(v, 1) for v in v_speech.values())}")
+    check("임베딩 있는 같은 사람은 조각을 넘어 합쳐진다",
+          v_turns[1]["speaker"] == v_turns[3]["speaker"],
+          f"{v_turns[1]['speaker']} vs {v_turns[3]['speaker']}")
+    check("임베딩 없는 화자는 결과 임베딩에서 빠진다", len(v_emb) == 1, str(sorted(v_emb)))
+    check("발화 시간은 전부 보존된다", abs(sum(v_speech.values()) - 18.0) < 1e-9,
+          f"{sum(v_speech.values())}초")
+except ValueError as exc:
+    check("임베딩 없는 화자가 섞여도 죽지 않는다", False, str(exc))
+
+# turn 에만 나오는 라벨도 반드시 새 이름을 받아야 한다.
+# 원래 라벨을 그대로 두면 다른 사람이 조용히 한 명으로 합쳐진다.
+stray = stitch.merge([
+    ([{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
+     {"SPEAKER_00": voice(0)}, {"SPEAKER_00": 5.0}),
+    ([{"start": 9.0, "end": 12.0, "speaker": "SPEAKER_00"}],   # speech_sec 에 없는 라벨
+     {}, {}),
+])
+check("turn 에만 있는 라벨도 딴 사람으로 분리된다",
+      stray[0][0]["speaker"] != stray[0][1]["speaker"],
+      f"{stray[0][0]['speaker']} vs {stray[0][1]['speaker']}")
+
 # ── 환각 필터 ─────────────────────────────────────────────────────────
 print("\n── 환각 필터 ──")
 from app import cleanup  # noqa: E402

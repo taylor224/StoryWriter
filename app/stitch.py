@@ -32,7 +32,14 @@ class _Speaker:
 
 
 def _similarity(vector: np.ndarray, speaker: _Speaker) -> float:
-    """조각이 늘수록 평균만 보면 흐려진다. 개별 조각과의 최댓값도 같이 본다."""
+    """조각이 늘수록 평균만 보면 흐려진다. 개별 조각과의 최댓값도 같이 본다.
+
+    벡터가 없는 화자와는 비교할 방법이 없다. pyannote 가 겹침만 있는 화자의
+    임베딩을 NaN 으로 내놓으면 diarize 가 버리므로(발화 시간은 남는다), 목소리를
+    모르는 화자가 목록에 섞인다. -1 을 돌려 어떤 임계값도 통과하지 못하게 한다.
+    """
+    if not speaker.vectors:
+        return -1.0
     best = max(float(vector @ other) for other in speaker.vectors)
     return max(best, float(vector @ speaker.centroid))
 
@@ -50,9 +57,13 @@ def merge(
     notes: list[str] = []
 
     for index, (part_turns, part_embeddings, part_speech) in enumerate(parts):
-        mapping = _assign(part_embeddings, part_speech, speakers, index, notes)
+        # turn 에만 나오는 라벨까지 반드시 대응시킨다. 빠뜨리고 원래 라벨을
+        # 그대로 두면 조각 2 의 SPEAKER_00 이 전체 기준 SPEAKER_00 과 같은
+        # 이름이 되어, 다른 사람이 조용히 한 명으로 합쳐진다.
+        appearing = {turn["speaker"] for turn in part_turns}
+        mapping = _assign(part_embeddings, part_speech, speakers, index, notes, appearing)
         for turn in part_turns:
-            turns.append({**turn, "speaker": mapping.get(turn["speaker"], turn["speaker"])})
+            turns.append({**turn, "speaker": mapping[turn["speaker"]]})
 
     turns.sort(key=lambda t: (t["start"], t["end"]))
     embeddings = {s.label: s.centroid for s in speakers if s.vectors}
@@ -66,16 +77,18 @@ def _assign(
     speakers: list[_Speaker],
     index: int,
     notes: list[str],
+    appearing: set[str] | None = None,
 ) -> dict[str, str]:
     """조각 하나의 라벨을 전체 라벨로 대응시킨다. {'SPEAKER_00': 'SPEAKER_02'}"""
-    labels = sorted(set(part_speech) | set(part_embeddings))
+    labels = sorted(set(part_speech) | set(part_embeddings) | set(appearing or ()))
     mapping: dict[str, str] = {}
     if not labels:
         return mapping
 
     # 임베딩이 없는 라벨은 대조할 방법이 없다. 새 화자로 두는 수밖에.
+    # (pyannote 는 겹침만 있는 화자의 임베딩을 NaN 으로 내놓고, diarize 가 버린다)
     known = [label for label in labels if part_embeddings.get(label) is not None]
-    unknown = [label for label in labels if label not in known]
+    unknown = [label for label in labels if label not in set(known)]
 
     if speakers and known:
         vectors = {label: db.normalize(part_embeddings[label]) for label in known}
