@@ -76,7 +76,11 @@ warnings.filterwarnings(
 
 # ── 모델 ──────────────────────────────────────────────────────────────
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3").strip()
+# large-v3-turbo 는 디코더를 32층에서 4층으로 줄인 증류 모델이다. 5~8배 빠르고
+# 단어오류율 차이는 평균 0.4%p 수준. 대신 디코더가 얕아 반복·환각에 더 잘 빠지므로
+# 무음 제거(vad)와 환각 필터(cleanup)를 켠 채로 쓰는 것을 전제한다.
+# 정확도가 최우선이면 WHISPER_MODEL=large-v3.
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo").strip()
 DIARIZE_MODEL = os.getenv(
     "DIARIZE_MODEL", "pyannote/speaker-diarization-community-1"
 ).strip()
@@ -87,6 +91,42 @@ DEVICE = os.getenv("DEVICE", "auto").strip().lower()
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "auto").strip().lower()
 BATCH_SIZE = _int("BATCH_SIZE", 8)
 UNLOAD_BETWEEN_STAGES = _bool("UNLOAD_BETWEEN_STAGES", False)
+
+# ── 무음 제거 (전사 전 잘라내기) ────────────────────────────────────────
+# 잘라낸 만큼 시각이 당겨지는 문제는 vad.Timeline 이 되돌린다. 결과 타임스탬프는
+# 항상 원본 오디오 기준이므로 여기 값을 바꿔도 재생 위치는 어긋나지 않는다.
+TRIM_SILENCE = _bool("TRIM_SILENCE", True)
+# 이 길이 이상 이어지는 침묵만 잘라낸다. 짧은 숨·뜸은 말의 일부다.
+TRIM_MIN_SILENCE_SEC = _float("TRIM_MIN_SILENCE_SEC", 0.8)
+# 발화 앞뒤로 남겨 둘 여유. 말의 첫소리/끝소리가 잘리는 걸 막는다.
+TRIM_PAD_SEC = _float("TRIM_PAD_SEC", 0.25)
+# 잡음 바닥과 발화 세기 사이 어디에 기준선을 둘지 (0~1). 올리면 더 많이 잘린다.
+TRIM_SENSITIVITY = _float("TRIM_SENSITIVITY", 0.30)
+# 이보다 짧은 소리는 발화로 치지 않는다 (클릭·기침 등)
+TRIM_MIN_SPEECH_SEC = _float("TRIM_MIN_SPEECH_SEC", 0.10)
+# 잡음과 발화의 세기 차가 이 값 미만이면 아예 자르지 않는다
+TRIM_MIN_DYNAMIC_DB = _float("TRIM_MIN_DYNAMIC_DB", 12.0)
+
+# ── 긴 파일 조각 처리 ──────────────────────────────────────────────────
+# 이 길이를 넘으면 조각으로 나눠 돌린다 (0 이면 끄기). 속도뿐 아니라 품질
+# 문제이기도 하다 — pyannote 는 아주 긴 파일에서 같은 사람을 여러 명으로
+# 갈라놓는 경향이 있다. 조각 경계는 침묵 한가운데로 잡고, 조각 간 화자는
+# 목소리 임베딩으로 다시 이어 붙인다 (stitch.py).
+CHUNK_SEC = _float("CHUNK_SEC", 3600.0)
+# 조각 간 같은 사람 판정 임계값 (코사인). 같은 녹음·같은 마이크라 등록 화자
+# 대조(MATCH_THRESHOLD)보다 조건이 좋아 조금 높게 잡는다.
+STITCH_THRESHOLD = _float("STITCH_THRESHOLD", 0.65)
+
+# ── 환각 필터 ──────────────────────────────────────────────────────────
+# Whisper 가 잡음 구간에서 지어낸 문장을 걸러낸다. 내용이 없는 반복은 지우고,
+# 상투구는 소리가 글자를 뒷받침하지 않는다는 증거가 있을 때만 지운다.
+# 나머지 의심 구간은 결과에 그대로 두고 표시만 한다 (cleanup.py 참고).
+DROP_HALLUCINATION = _bool("DROP_HALLUCINATION", True)
+# 정렬 모델이 매긴 단어 신뢰도 평균이 이 값 미만이면 소리와 글자가 안 맞는
+# 것으로 본다. 0 이면 이 증거만 쓰지 않는다 (말 속도 검사는 남는다).
+HALLUCINATION_MIN_SCORE = _float("HALLUCINATION_MIN_SCORE", 0.30)
+# true 면 "의심"으로 표시만 하던 구간까지 전부 지운다. 진짜 발언을 잃을 수 있다.
+DROP_SUSPECT = _bool("DROP_SUSPECT", False)
 
 # ── 화자 매칭 ──────────────────────────────────────────────────────────
 MATCH_THRESHOLD = _float("MATCH_THRESHOLD", 0.60)

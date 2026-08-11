@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from . import asr, config
+from . import asr, audio, config, vad
 
 _lock = threading.RLock()
 _pipeline = None
@@ -44,8 +44,12 @@ def unload_pipeline() -> None:
     asr.free_vram()
 
 
-def load_waveform(wav_path: Path) -> dict[str, Any]:
+def load_waveform(wav_path: Path, timeline: "vad.Timeline | None" = None) -> dict[str, Any]:
     """16kHz mono PCM wav 를 pyannote 가 받는 in-memory 형태로 읽는다.
+
+    timeline 을 주면 무음을 들어낸 파형을 넘긴다. pyannote 의 세그멘테이션은
+    슬라이딩 윈도로 파일 전체를 훑기 때문에 침묵도 그대로 비용이다. 10시간짜리
+    회의 녹음처럼 빈 구간이 많으면 여기서 줄어드는 시간이 가장 크다.
 
     pyannote 4.x 는 파일 경로를 주면 torchcodec 으로 디코딩하는데, torchcodec 은
     FFmpeg 공유 라이브러리(avcodec/avformat DLL)를 요구한다. Windows 의 winget
@@ -54,33 +58,16 @@ def load_waveform(wav_path: Path) -> dict[str, Any]:
     우리는 이미 ffmpeg CLI 로 16kHz mono 16bit wav 를 만들어 두므로, 표준
     라이브러리로 직접 읽어 넘기면 torchcodec 경로를 아예 타지 않는다.
     """
-    import wave
-
     import torch
 
-    try:
-        with wave.open(str(wav_path), "rb") as handle:
-            channels = handle.getnchannels()
-            width = handle.getsampwidth()
-            rate = handle.getframerate()
-            frames = handle.readframes(handle.getnframes())
-    except wave.Error as exc:
-        raise RuntimeError(
-            f"16bit PCM wav 로 읽을 수 없습니다 ({wav_path.name}): {exc}. "
-            "audio.to_wav16k 를 거친 파일인지 확인하세요."
-        ) from exc
-
-    if width != 2:
-        raise RuntimeError(
-            f"16bit PCM wav 가 아닙니다 (sampwidth={width}). audio.to_wav16k 를 거쳤는지 확인하세요."
-        )
-
-    samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
-    if channels > 1:
-        samples = samples.reshape(-1, channels).mean(axis=1)
+    # 조각이면 그 범위만 읽는다. 10시간짜리를 통째로 올리지 않기 위한 것.
+    origin, finish = timeline.span if timeline is not None else (0, None)
+    samples = audio.read_wav(wav_path, origin, finish)
+    if timeline is not None:
+        samples = timeline.apply(samples, origin)
 
     waveform = torch.from_numpy(np.ascontiguousarray(samples)).unsqueeze(0)
-    return {"waveform": waveform, "sample_rate": rate}
+    return {"waveform": waveform, "sample_rate": vad.SAMPLE_RATE}
 
 
 def _build_pipeline():
@@ -115,12 +102,16 @@ def diarize(
     num_speakers: int | None = None,
     min_speakers: int | None = None,
     max_speakers: int | None = None,
+    timeline: "vad.Timeline | None" = None,
 ) -> tuple[list[dict], dict[str, np.ndarray], dict[str, float]]:
     """반환: (turns, embeddings, speech_sec)
 
     turns      : [{'start', 'end', 'speaker'}] 시작 시각 오름차순
     embeddings : {'SPEAKER_00': np.ndarray(256,)}  — 값이 없는 화자는 빠질 수 있음
     speech_sec : {'SPEAKER_00': 총 발화 초}
+
+    timeline 을 주면 무음을 들어낸 파형으로 돌리되 turns 는 원본 시각으로
+    되돌려 내보낸다. 호출부는 항상 원본 기준 결과만 본다.
     """
     pipeline = get_pipeline()
 
@@ -134,7 +125,7 @@ def diarize(
             kwargs["max_speakers"] = int(max_speakers)
 
     # 파일 경로 대신 파형을 직접 넘겨 torchcodec 디코딩 경로를 우회한다
-    audio_input: Any = load_waveform(wav_path)
+    audio_input: Any = load_waveform(wav_path, timeline)
     full, exclusive, raw_embeddings = _apply(pipeline, audio_input, kwargs)
 
     # 단어에 화자를 붙일 때는 겹침이 제거된 쪽을 쓴다. 겹치는 구간에서는 어차피
@@ -143,10 +134,15 @@ def diarize(
         {"start": float(seg.start), "end": float(seg.end), "speaker": str(label)}
         for seg, _, label in (exclusive or full).itertracks(yield_label=True)
     ]
+    if timeline is not None:
+        turns = _restore_turns(turns, timeline)
     turns.sort(key=lambda t: (t["start"], t["end"]))
 
     # 발화 시간은 겹침을 포함한 원본 기준이어야 실제로 얼마나 말했는지에 가깝다.
     # 임베딩을 믿을 만한지 판단하는 데 쓰이므로 이쪽이 맞다.
+    #
+    # 무음을 들어낸 경우에도 이 합은 그대로 쓴다. 잘라낸 건 침묵뿐이고
+    # Timeline.split 은 길이를 보존하므로, 원본으로 되돌려 더해도 값이 같다.
     speech: dict[str, float] = {}
     for seg, _, label in full.itertracks(yield_label=True):
         key = str(label)
@@ -166,6 +162,20 @@ def diarize(
                 embeddings[str(label)] = vec
 
     return turns, embeddings, speech
+
+
+def _restore_turns(turns: list[dict], timeline: "vad.Timeline") -> list[dict]:
+    """화자 구간을 원본 시각으로 되돌린다. 잘린 자리를 넘는 구간은 쪼갠다.
+
+    쪼개지 않으면 그 화자가 없앤 침묵까지 차지하고, 침묵 건너편에 있는 다른
+    화자의 단어를 겹침 계산에서 빼앗아 간다 (attach_speakers 참고).
+    """
+    restored: list[dict] = []
+    for turn in turns:
+        for start, end in timeline.split(turn["start"], turn["end"]):
+            if end > start:
+                restored.append({"start": start, "end": end, "speaker": turn["speaker"]})
+    return restored
 
 
 def _apply(pipeline, audio_input: Any, kwargs: dict[str, Any]):

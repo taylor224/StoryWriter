@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Body, FastAPI, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -206,6 +206,32 @@ def api_get_result(name: str):
     ]
     slim["registered"] = db.list_speakers()
     return slim
+
+
+@app.get("/api/results/{name}/clip")
+def api_clip(name: str, start: float = 0.0, end: float = 0.0):
+    """전사록 한 줄에 해당하는 오디오 조각. 그 줄을 눌렀을 때 재생용.
+
+    전체 wav 를 내려보내지 않는다. 10시간 녹음이면 1.1GB 라 브라우저가 다
+    받을 때까지 아무 소리도 안 난다.
+    """
+    payload = render.load(name)
+    if payload is None:
+        raise HTTPException(404, "결과를 찾을 수 없습니다.")
+
+    # audio_file 은 우리가 쓴 값이지만, 결과 json 은 사용자가 만질 수 있는
+    # 파일이다. 파일명만 취해 UPLOAD_DIR 밖으로 나가지 못하게 한다.
+    wav_path = config.UPLOAD_DIR / Path(payload.get("audio_file") or "").name
+    if not wav_path.is_file():
+        raise HTTPException(404, "원본 오디오가 없습니다 (uploads 폴더에서 지워졌을 수 있습니다).")
+
+    # 첫 소리가 잘려 들리지 않도록 앞뒤로 아주 조금 넓혀 준다
+    data = audio.clip_wav(wav_path, max(0.0, start - 0.15), end + 0.25)
+    return Response(
+        content=data,
+        media_type="audio/wav",
+        headers={"Cache-Control": "no-store", "Content-Length": str(len(data))},
+    )
 
 
 @app.get("/api/results/{name}/download")

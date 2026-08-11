@@ -267,9 +267,19 @@ async function initResult() {
   const lang = detection.auto
     ? `언어 ${resultData.language} (자동 감지, 확신도 ${detection.confidence ?? "?"})`
     : `언어 ${resultData.language} (고정)`;
+  // 무음을 잘라내거나 조각으로 나눠 인식했어도 타임스탬프는 원본 기준이라
+  // 재생 위치는 그대로다
+  const trim = resultData.trim || {};
+  const notes = [];
+  if (trim.enabled) notes.push(`무음 ${hhmmss(trim.removed)} 제외하고 인식`);
+  if ((resultData.chunks || []).length > 1)
+    notes.push(`${resultData.chunks.length}개 조각으로 처리`);
+  if ((resultData.dropped || []).length)
+    notes.push(`환각 ${resultData.dropped.length}건 제외`);
   $("#result-meta").textContent =
     `${(resultData.created_at || "").replace("T", " ")} · ${hhmmss(resultData.duration)} · ` +
-    `${lang} · 원본 ${resultData.source_file}`;
+    `${lang} · 원본 ${resultData.source_file}` +
+    (notes.length ? ` · ${notes.join(" · ")}` : "");
 
   const warnings = $("#warnings");
   warnings.innerHTML = (resultData.warnings || [])
@@ -311,17 +321,60 @@ function renderSpeakerPanel() {
   $("#speaker-panel").innerHTML = datalist + rows;
 }
 
+// 전사록 한 줄을 누르면 그 구간만 재생한다. 서버가 그 조각만 잘라 주므로
+// 10시간짜리라도 즉시 소리가 난다 (전체 wav 는 1.1GB 다).
+let player = null;
+let playingLine = null;
+
+function stopPlayback() {
+  if (player) {
+    player.pause();
+    player.removeAttribute("src");
+    player.load();
+  }
+  if (playingLine) {
+    playingLine.classList.remove("playing");
+    playingLine = null;
+  }
+}
+
+function playLine(row) {
+  if (playingLine === row) return stopPlayback(); // 같은 줄을 다시 누르면 정지
+  stopPlayback();
+
+  if (!player) {
+    player = new Audio();
+    player.addEventListener("ended", stopPlayback);
+    player.addEventListener("error", () => {
+      if (playingLine) playingLine.classList.add("failed");
+      stopPlayback();
+    });
+  }
+  const name = encodeURIComponent(document.body.dataset.name);
+  const { start, end } = row.dataset;
+  player.src = `/api/results/${name}/clip?start=${start}&end=${end}`;
+  row.classList.remove("failed");
+  row.classList.add("playing");
+  playingLine = row;
+  player.play().catch(() => stopPlayback());
+}
+
 function renderTranscript() {
+  stopPlayback();
   const showTime = $("#show-time").checked;
   $("#transcript").innerHTML = (resultData.lines || [])
     .map(
-      (line) => `<div class="line">
+      (line) => `<div class="line" data-start="${line.start}" data-end="${line.end}">
         <button class="who" data-jump="${esc(line.speaker || "")}">${esc(line.name)}</button>
         ${showTime ? `<span class="time">${hhmmss(line.start)}</span>` : ""}
-        <span class="said">${esc(line.text)}</span>
+        <button class="said" title="눌러서 이 부분만 듣기">${esc(line.text)}</button>
       </div>`
     )
     .join("");
+
+  document.querySelectorAll(".transcript .said").forEach((button) =>
+    button.addEventListener("click", () => playLine(button.closest(".line")))
+  );
 
   document.querySelectorAll("[data-jump]").forEach((button) =>
     button.addEventListener("click", () => {

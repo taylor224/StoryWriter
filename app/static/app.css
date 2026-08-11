@@ -189,7 +189,27 @@ small.hint { margin: 4px 0 16px 22px; }
 }
 .line .who:hover { text-decoration: underline; }
 .line .time { flex: 0 0 auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.line .said { flex: 1; white-space: pre-wrap; }
+
+/* 말한 내용 자체가 재생 버튼이다 — 누르면 그 구간만 들려준다 */
+.line .said {
+  flex: 1;
+  white-space: pre-wrap;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  margin: -2px -6px;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.line .said:hover { background: var(--hover, rgba(127, 127, 127, 0.12)); }
+.line.playing .said {
+  background: var(--hover, rgba(127, 127, 127, 0.12));
+  box-shadow: inset 3px 0 0 var(--ok);
+}
+.line.failed .said { text-decoration: underline wavy var(--warn, #c60); }
 
 /* 화자 관리 */
 .inline-form { display: flex; gap: 10px; align-items: center; }
