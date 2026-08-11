@@ -380,7 +380,9 @@ async def api_add_sample(speaker_id: int, file: UploadFile):
 
     wav_path = config.SAMPLE_DIR / f"{safe}.wav"
     try:
-        audio.to_wav16k(raw_path, wav_path)
+        # 전사할 때와 같은 필터를 건다. 다르게 처리한 오디오로 보이스프린트를
+        # 뜨면 나중에 결과와 대조할 때 같은 목소리가 다르게 보인다.
+        audio.to_wav16k(raw_path, wav_path, config.AUDIO_FILTER)
         length = audio.duration_sec(wav_path)
         if length < 3:
             raise HTTPException(400, "샘플이 너무 짧습니다. 10초 이상을 권장합니다.")

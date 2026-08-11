@@ -202,22 +202,53 @@ def params() -> dict:
         "sensitivity": config.TRIM_SENSITIVITY,
         "min_speech": config.TRIM_MIN_SPEECH_SEC,
         "min_dynamic_db": config.TRIM_MIN_DYNAMIC_DB,
+        "highpass": config.TRIM_HIGHPASS_HZ,
     }
 
 
 # ── 무음 판정 ─────────────────────────────────────────────────────────
-def _frame_db(samples: np.ndarray, frame: int) -> np.ndarray:
-    """프레임별 RMS 를 dBFS 로.
+def _power_db(block: np.ndarray, frame: int) -> np.ndarray:
+    """(n, frame) 로 접은 파형의 프레임별 RMS 를 dBFS 로.
 
     samples**2 는 원본 크기의 임시 배열을 하나 더 만든다. 1시간짜리면 230MB 라
     einsum 으로 제곱합만 뽑아 그 복사를 피한다.
     """
+    power = np.einsum("ij,ij->i", block, block) / frame
+    return 10.0 * np.log10(power + EPS)
+
+
+def _frame_db(samples: np.ndarray, frame: int, sample_rate: int = 0) -> np.ndarray:
+    """프레임별 RMS 를 dBFS 로. 판정 전에 저주파를 걷어낸다.
+
+    에어컨·프로젝터 팬·책상 진동은 대부분 100Hz 아래에 몰려 있다. 사람 목소리의
+    기본 주파수는 낮아도 85Hz 부터라 그 아래는 버려도 말이 상하지 않는다.
+
+    안 걷으면 잡음 바닥이 통째로 올라가 무음과 발화의 세기 차가 좁아지고,
+    "차이가 12dB 미만" 에 걸려 아예 자르지 못한다. 조용한 사무실 녹음인데
+    무음 제거가 안 먹는 경우가 대개 이것이다.
+
+    걸러낸 파형은 여기서만 쓰고 버린다. 전사·화자 분리에 넘기는 파형은 원본
+    그대로다 — Whisper 는 잡음 섞인 오디오로 학습돼서 손대면 되레 나빠진다.
+    """
     count = samples.shape[0] // frame
     if count == 0:
         return np.empty(0, dtype=np.float32)
-    block = samples[: count * frame].reshape(count, frame)
-    power = np.einsum("ij,ij->i", block, block) / frame
-    return 10.0 * np.log10(power + EPS)
+    usable = count * frame
+    if config.TRIM_HIGHPASS_HZ <= 0 or not sample_rate:
+        return _power_db(samples[:usable].reshape(count, frame), frame)
+
+    from scipy.signal import butter, sosfilt, sosfilt_zi
+
+    sos = butter(2, config.TRIM_HIGHPASS_HZ / (sample_rate / 2), btype="highpass", output="sos")
+    state = sosfilt_zi(sos) * float(samples[0])
+    # 블록으로 흘려 보낸다. 10시간짜리를 한 번에 필터링하면 사본만 2.3GB 다.
+    step = frame * 20_000
+    parts = []
+    for start in range(0, usable, step):
+        block = samples[start : min(start + step, usable)]
+        filtered, state = sosfilt(sos, block, zi=state)
+        parts.append(_power_db(filtered.reshape(-1, frame), frame))
+    return np.concatenate(parts) if parts else np.empty(0, dtype=np.float32)
 
 
 def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
@@ -250,7 +281,7 @@ def plan(samples: np.ndarray, sample_rate: int = SAMPLE_RATE) -> tuple[Timeline,
     if total < sample_rate:  # 1초 미만이면 잘라낼 것도 없다
         return identity, None
 
-    level = _frame_db(samples, frame)
+    level = _frame_db(samples, frame, sample_rate)
 
     # 파일마다 잡음 바닥이 다르다. 절대 dB 로 자르면 조용한 녹음은 통째로
     # 무음이 되고, 시끄러운 녹음은 아무것도 안 잘린다. 그래서 이 파일 안에서

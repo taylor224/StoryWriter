@@ -16,7 +16,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import config, vad  # noqa: E402
+from app import audio as audio_io, config, vad  # noqa: E402
 
 SR = vad.SAMPLE_RATE
 rng = np.random.default_rng(7)
@@ -170,6 +170,58 @@ finally:
     config.TRIM_PAD_SEC = original_pad
 
 
+# ── 저역 웅웅거림에도 무음 판정이 되는가 ──────────────────────────────
+# 에어컨·팬은 100Hz 아래에 몰려 있다. 안 걷으면 잡음 바닥이 통째로 올라가
+# "세기 차이가 12dB 미만" 에 걸려 아예 자르지 못한다.
+print("\n── 저역 웅웅거림 ──")
+moment = np.arange(len(audio)) / SR
+hum = (0.035 * np.sin(2 * np.pi * 45 * moment)
+       + 0.02 * np.sin(2 * np.pi * 90 * moment)).astype(np.float32)
+rumbling = (audio + hum).astype(np.float32)
+
+original_hz, config.TRIM_HIGHPASS_HZ = config.TRIM_HIGHPASS_HZ, 0.0
+try:
+    without = vad.plan(rumbling)[0]
+finally:
+    config.TRIM_HIGHPASS_HZ = original_hz
+with_filter = vad.plan(rumbling)[0]
+print(f"       고역통과 없음: {without.stats()['removed']:.1f}초 제거 / "
+      f"{config.TRIM_HIGHPASS_HZ:.0f}Hz 적용: {with_filter.stats()['removed']:.1f}초 제거")
+
+check("웅웅거림이 깔리면 고역통과 없이는 무음을 못 자른다", not without.trimmed,
+      f"{without.stats()['removed']:.1f}초")
+check("고역통과를 걸면 정상적으로 잘라낸다", with_filter.trimmed,
+      f"{with_filter.stats()['removed']:.1f}초")
+check("깨끗한 녹음의 결과는 고역통과와 무관하게 같다",
+      abs(with_filter.stats()["removed"] - stats["removed"]) < 1.5,
+      f"{with_filter.stats()['removed']:.1f} vs {stats['removed']:.1f}")
+check("고역통과가 캐시 키에 들어 있다", "highpass" in vad.params())
+
+# ── ffmpeg 필터 묶음 ──────────────────────────────────────────────────
+print("\n── ffmpeg 필터 묶음 ──")
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+
+check("off 는 빈 문자열", audio_io.filter_chain("off") == "")
+check("알 수 없는 이름은 그대로 필터로 넘긴다",
+      audio_io.filter_chain("highpass=f=200") == "highpass=f=200")
+check("대소문자 무시", audio_io.filter_chain("VOICE") == audio_io.FILTERS["voice"])
+
+if shutil.which("ffmpeg"):
+    for preset, chain in audio_io.FILTERS.items():
+        if not chain:
+            continue
+        done = subprocess.run(
+            ["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi",
+             "-i", "sine=frequency=300:duration=1:sample_rate=16000",
+             "-af", chain, "-f", "null", "-"],
+            capture_output=True, text=True,
+        )
+        check(f"'{preset}' 필터가 ffmpeg 에서 실제로 돈다", done.returncode == 0,
+              done.stderr.strip().splitlines()[-1] if done.returncode else chain)
+else:
+    print("       ffmpeg 가 없어 필터 실행 검증은 건너뜀")
+
 # ── 조각 나누기 ───────────────────────────────────────────────────────
 print("\n── 조각 나누기 ──")
 pieces = vad.chunks(timeline, 20.0)   # 57.5초를 20초씩
@@ -208,7 +260,6 @@ import io  # noqa: E402
 import tempfile  # noqa: E402
 import wave as wave_mod  # noqa: E402
 
-from app import audio as audio_io  # noqa: E402
 
 with tempfile.TemporaryDirectory() as folder:
     sample_path = Path(folder) / "sample.wav"

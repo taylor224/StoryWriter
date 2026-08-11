@@ -92,6 +92,15 @@ COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "auto").strip().lower()
 BATCH_SIZE = _int("BATCH_SIZE", 8)
 UNLOAD_BETWEEN_STAGES = _bool("UNLOAD_BETWEEN_STAGES", False)
 
+# ── 오디오 필터 ────────────────────────────────────────────────────────
+# 전사 전에 ffmpeg 필터를 걸어 소리를 다듬는다. off | voice | denoise | declip
+# 또는 ffmpeg 필터 문자열 (audio.FILTERS 참고).
+#
+# 기본이 off 인 이유: Whisper 는 잡음 섞인 실제 오디오로 학습돼 웬만한 잡음에
+# 이미 강하다. 노이즈 제거를 세게 걸면 학습 때 본 적 없는 아티팩트가 생겨
+# 되레 인식률이 떨어지는 사례가 흔하다. 켤 때는 켜기 전후를 꼭 비교할 것.
+AUDIO_FILTER = os.getenv("AUDIO_FILTER", "off").strip()
+
 # ── 무음 제거 (전사 전 잘라내기) ────────────────────────────────────────
 # 잘라낸 만큼 시각이 당겨지는 문제는 vad.Timeline 이 되돌린다. 결과 타임스탬프는
 # 항상 원본 오디오 기준이므로 여기 값을 바꿔도 재생 위치는 어긋나지 않는다.
@@ -106,6 +115,10 @@ TRIM_SENSITIVITY = _float("TRIM_SENSITIVITY", 0.30)
 TRIM_MIN_SPEECH_SEC = _float("TRIM_MIN_SPEECH_SEC", 0.10)
 # 잡음과 발화의 세기 차가 이 값 미만이면 아예 자르지 않는다
 TRIM_MIN_DYNAMIC_DB = _float("TRIM_MIN_DYNAMIC_DB", 12.0)
+# 무음 판정 전에 이 주파수 아래를 걷어낸다 (Hz). 0 이면 끈다.
+# 에어컨·팬·책상 진동은 100Hz 아래에 몰려 있고, 이게 잡음 바닥을 올려 무음
+# 판정을 방해한다. 판정에만 쓰고 모델에 넘기는 파형은 원본 그대로다.
+TRIM_HIGHPASS_HZ = _float("TRIM_HIGHPASS_HZ", 80.0)
 
 # ── 긴 파일 조각 처리 ──────────────────────────────────────────────────
 # 이 길이를 넘으면 조각으로 나눠 돌린다 (0 이면 끄기). 속도뿐 아니라 품질

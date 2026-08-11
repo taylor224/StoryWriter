@@ -31,14 +31,45 @@ def ffmpeg_path() -> str:
     return exe
 
 
-def to_wav16k(src: Path, dst: Path) -> Path:
+# 전사 전에 걸 수 있는 ffmpeg 필터 묶음.
+#
+# 기본이 off 인 이유: Whisper 는 68만 시간의 잡음 섞인 실제 오디오로 학습돼서
+# 웬만한 잡음에는 이미 강하다. 노이즈 제거를 세게 걸면 학습 때 본 적 없는
+# 인공적인 아티팩트가 생겨 되레 인식률이 떨어지는 사례가 흔하다.
+# "뚜렷하게" 가 곧 "잘 인식됨" 이 아니다.
+#
+# 그래도 도움이 되는 상황이 있어서 골라 쓸 수 있게 둔다.
+FILTERS = {
+    # 아무것도 안 건다 (권장 기본값)
+    "off": "",
+    # 저역 웅웅거림을 걷고 멀리 앉은 사람 목소리를 끌어올린다.
+    # 회의실에서 한 명만 마이크에서 멀 때 그 사람 발언이 통째로 누락되는 걸 막는다.
+    # 스펙트럼을 건드리지 않아 Whisper 에 상대적으로 안전한 쪽.
+    "voice": "highpass=f=80,lowpass=f=7500,speechnorm=e=3",
+    # 위에 FFT 노이즈 제거를 더한다. 팬 소리·화이트노이즈가 계속 깔린 녹음용.
+    # 인식률이 오히려 나빠질 수 있으니 켜기 전후를 반드시 비교할 것.
+    "denoise": "highpass=f=80,afftdn=nf=-25,lowpass=f=7500,speechnorm=e=3",
+    # 찢어지게 녹음된(클리핑) 파일 복구
+    "declip": "adeclip,highpass=f=80,speechnorm=e=3",
+}
+
+
+def filter_chain(name: str) -> str:
+    """설정값을 ffmpeg 필터 문자열로. 목록에 없으면 그대로 필터로 넘긴다."""
+    key = (name or "off").strip()
+    return FILTERS.get(key.lower(), key)
+
+
+def to_wav16k(src: Path, dst: Path, audio_filter: str = "") -> Path:
     """src 를 16kHz mono 16bit wav 로 변환해 dst 에 쓴다."""
     exe = ffmpeg_path()
     dst.parent.mkdir(parents=True, exist_ok=True)
+    chain = filter_chain(audio_filter)
     cmd = [
         exe, "-nostdin", "-y",
         "-i", str(src),
         "-vn",              # 비디오 트랙 무시 (mp4/mkv 대응)
+        *(["-af", chain] if chain else []),
         "-ac", "1",
         "-ar", "16000",
         "-acodec", "pcm_s16le",
@@ -47,7 +78,12 @@ def to_wav16k(src: Path, dst: Path) -> Path:
     proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
     if proc.returncode != 0 or not dst.exists():
         tail = "\n".join(proc.stderr.strip().splitlines()[-8:])
-        raise RuntimeError(f"오디오 변환 실패 ({src.name}):\n{tail}")
+        hint = (
+            f"\n\nAUDIO_FILTER='{audio_filter}' 를 적용하다 실패했을 수 있습니다. "
+            f"쓸 수 있는 값: {', '.join(FILTERS)} 또는 ffmpeg 필터 문자열."
+            if chain else ""
+        )
+        raise RuntimeError(f"오디오 변환 실패 ({src.name}):\n{tail}{hint}")
     return dst
 
 

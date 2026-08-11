@@ -67,14 +67,16 @@ def run(
     # 확장자가 .wav 여도 44.1kHz 스테레오일 수 있으므로 항상 변환한다.
     progress("오디오 변환", 5)
     wav_path = config.UPLOAD_DIR / f"{name}.16k.wav"
-    audio_key = cache.audio_key(source)
+    # 필터를 바꾸면 wav 자체가 달라진다. 뒤 단계 키가 전부 이걸 물고 있으므로
+    # 여기 한 곳에 넣으면 전사부터 다시 돈다.
+    audio_key = {**cache.audio_key(source), "filter": config.AUDIO_FILTER}
 
     hit = cached("audio", audio_key)
     if hit and wav_path.exists():
         duration = hit["duration"]
         reused.append("오디오 변환")
     else:
-        audio.to_wav16k(source, wav_path)
+        audio.to_wav16k(source, wav_path, config.AUDIO_FILTER)
         duration = audio.duration_sec(wav_path)
         cache.save(name, "audio", audio_key, {"duration": duration})
 
@@ -356,6 +358,7 @@ def run(
         "language": detected,
         "language_detection": detection,
         "initial_prompt": prompt,
+        "audio_filter": config.AUDIO_FILTER,
         "trim": trim_info,
         "chunks": [
             {"start": round(p.span[0] / vad.SAMPLE_RATE, 2),
