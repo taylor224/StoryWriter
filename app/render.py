@@ -120,7 +120,11 @@ def order_labels(segments: list[dict], speech_sec: dict[str, float]) -> list[str
 def merge_lines(
     segments: list[dict], displays: dict[str, str], unknown: str = "화자?"
 ) -> list[dict[str, Any]]:
-    """연속된 같은 화자의 세그먼트를 한 줄로 합친다."""
+    """연속된 같은 화자의 세그먼트를 한 줄로 합친다.
+
+    라벨이 아니라 표시 이름으로 비교한다. 한 사람이 여러 화자로 쪼개져 나왔을 때
+    사용자가 둘에 같은 이름을 붙이면, 그것만으로 한 줄로 합쳐져야 하기 때문.
+    """
     lines: list[dict[str, Any]] = []
     for seg in segments:
         text = (seg.get("text") or "").strip()
@@ -128,7 +132,7 @@ def merge_lines(
             continue
         label = seg.get("speaker")
         name = displays.get(label, unknown) if label else unknown
-        if lines and lines[-1]["speaker"] == label:
+        if lines and lines[-1]["name"] == name:
             lines[-1]["text"] = f"{lines[-1]['text']} {text}".strip()
             lines[-1]["end"] = float(seg.get("end", lines[-1]["end"]) or lines[-1]["end"])
             continue

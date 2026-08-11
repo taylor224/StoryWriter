@@ -299,7 +299,7 @@ parts = [
      {"SPEAKER_00": voice(2)},
      {"SPEAKER_00": 8.0}),
 ]
-merged_turns, merged_emb, merged_speech, notes = stitch.merge(parts)
+merged_turns, merged_emb, merged_speech, merged_overlaps, notes = stitch.merge(parts)
 for note in notes:
     print(f"       {note}")
 
@@ -339,7 +339,7 @@ voiceless = [
      {"SPEAKER_00": 6.0}),
 ]
 try:
-    v_turns, v_emb, v_speech, _ = stitch.merge(voiceless)
+    v_turns, v_emb, v_speech, _, _ = stitch.merge(voiceless)
     check("임베딩 없는 화자가 섞여도 죽지 않는다", True)
     # 목소리 모르는 둘은 각각 따로 남고(4.0, 3.0), voice(0) 둘만 합쳐진다(5+6=11)
     check("임베딩 없는 화자는 아무와도 합쳐지지 않는다",
@@ -365,6 +365,73 @@ stray = stitch.merge([
 check("turn 에만 있는 라벨도 딴 사람으로 분리된다",
       stray[0][0]["speaker"] != stray[0][1]["speaker"],
       f"{stray[0][0]['speaker']} vs {stray[0][1]['speaker']}")
+
+# ── 과분할된 화자 다시 묶기 ───────────────────────────────────────────
+print("\n── 과분할된 화자 다시 묶기 ──")
+
+# pyannote 가 사람0 을 SPEAKER_00/SPEAKER_02 둘로 쪼갠 상황. 사람1 은 딴 사람.
+split_turns = [
+    {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+    {"start": 5.0, "end": 9.0, "speaker": "SPEAKER_01"},
+    {"start": 9.0, "end": 14.0, "speaker": "SPEAKER_02"},
+]
+split_emb = {"SPEAKER_00": voice(0), "SPEAKER_01": voice(1), "SPEAKER_02": voice(0)}
+split_speech = {"SPEAKER_00": 5.0, "SPEAKER_01": 4.0, "SPEAKER_02": 5.0}
+
+c_turns, c_emb, c_speech, c_notes = stitch.collapse(
+    split_turns, split_emb, dict(split_speech), []
+)
+for note in c_notes:
+    print(f"       {note}")
+check("쪼개진 같은 사람을 다시 묶는다", len(c_speech) == 2, f"{len(c_speech)}명")
+check("합쳐진 쪽 turn 이 같은 라벨이 된다",
+      c_turns[0]["speaker"] == c_turns[2]["speaker"],
+      f"{c_turns[0]['speaker']} vs {c_turns[2]['speaker']}")
+check("딴 사람은 그대로 둔다", c_turns[1]["speaker"] != c_turns[0]["speaker"])
+check("발화 시간이 합산된다", abs(max(c_speech.values()) - 10.0) < 1e-9, str(c_speech))
+check("합계는 보존된다", abs(sum(c_speech.values()) - 14.0) < 1e-9, str(sum(c_speech.values())))
+
+# 동시에 말한 적이 있으면 아무리 닮아도 묶지 않는다 — 같은 사람일 수 없다
+o_turns, o_emb, o_speech, o_notes = stitch.collapse(
+    split_turns, split_emb, dict(split_speech), [["SPEAKER_00", "SPEAKER_02"]]
+)
+check("동시에 말한 쌍은 닮아도 안 묶는다", len(o_speech) == 3 and not o_notes,
+      f"{len(o_speech)}명")
+
+# 반증은 합쳐질 때 옮겨 받아야 한다 (A~B 를 묶으면 B 와 겹친 C 는 A 와도 다른 사람)
+chain_turns = [{"start": float(i), "end": i + 1.0, "speaker": f"SPEAKER_0{i}"} for i in range(3)]
+chain = stitch.collapse(
+    chain_turns,
+    {"SPEAKER_00": voice(0), "SPEAKER_01": voice(0), "SPEAKER_02": voice(0)},
+    {"SPEAKER_00": 5.0, "SPEAKER_01": 5.0, "SPEAKER_02": 5.0},
+    [["SPEAKER_01", "SPEAKER_02"]],   # 01 과 02 는 동시에 말했다
+)
+check("반증이 합병을 따라 옮겨간다", len(chain[2]) == 2, f"{len(chain[2])}명 {chain[2]}")
+
+original_merge, config.MERGE_THRESHOLD = config.MERGE_THRESHOLD, 0.0
+try:
+    off = stitch.collapse(split_turns, split_emb, dict(split_speech), [])
+    check("MERGE_THRESHOLD=0 이면 아무것도 안 묶는다", len(off[2]) == 3 and not off[3])
+finally:
+    config.MERGE_THRESHOLD = original_merge
+
+# 목소리를 모르는 화자는 묶을 근거가 없으니 그대로 남는다
+q_turns, q_emb, q_speech, _ = stitch.collapse(
+    split_turns + [{"start": 20.0, "end": 23.0, "speaker": "SPEAKER_09"}],
+    split_emb, {**split_speech, "SPEAKER_09": 3.0}, [],
+)
+check("목소리 모르는 화자는 건드리지 않는다", "SPEAKER_09" in q_speech, str(sorted(q_speech)))
+
+# 같은 이름을 붙이면 한 줄로 합쳐지는가 (사용자가 직접 고치는 경로)
+from app import render  # noqa: E402
+
+lines = render.merge_lines(
+    [{"speaker": "SPEAKER_00", "text": "앞부분", "start": 0.0, "end": 1.0},
+     {"speaker": "SPEAKER_02", "text": "뒷부분", "start": 1.0, "end": 2.0}],
+    {"SPEAKER_00": "안차돌", "SPEAKER_02": "안차돌"},
+)
+check("같은 이름을 준 화자는 한 줄로 합쳐진다",
+      len(lines) == 1 and lines[0]["text"] == "앞부분 뒷부분", str(lines))
 
 # ── 환각 필터 ─────────────────────────────────────────────────────────
 print("\n── 환각 필터 ──")

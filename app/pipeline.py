@@ -232,6 +232,7 @@ def run(
             "max_speakers": max_speakers,
             "trim": trim_params,
             "chunk": chunk_id,
+            "v": 2,  # 출력에 overlaps 가 추가됐다 — 옛 캐시를 새 코드가 읽으면 안 된다
         }
         hit = cached(stage("diarize", index), diarize_key)
         if hit:
@@ -241,11 +242,12 @@ def run(
                 for label, vector in hit["embeddings"].items()
             }
             speech_sec = hit["speech_sec"]
+            overlaps = hit.get("overlaps") or []
             reused.append(f"{head}화자 분리")
             progress(f"{head}화자 분리 결과 재사용", base + step * 0.95)
         else:
             progress(f"{head}화자 분리 중", base + step * 0.75)
-            turns, embeddings, speech_sec = diarize.diarize(
+            turns, embeddings, speech_sec, overlaps = diarize.diarize(
                 wav_path,
                 min_speakers=min_speakers,
                 max_speakers=max_speakers,
@@ -257,11 +259,12 @@ def run(
                     "turns": turns,
                     "embeddings": {k: v.tolist() for k, v in embeddings.items()},
                     "speech_sec": speech_sec,
+                    "overlaps": overlaps,
                 },
             )
             if config.UNLOAD_BETWEEN_STAGES:
                 diarize.unload_pipeline()
-        parts.append((turns, embeddings, speech_sec))
+        parts.append((turns, embeddings, speech_sec, overlaps))
 
     # 언어를 잘못 잡으면 Whisper 는 하지도 않은 말을 그럴듯하게 지어낸다.
     # 조용히 넘어가면 원인을 못 찾으므로 판정 근거를 결과에 남긴다.
@@ -276,17 +279,28 @@ def run(
                 "결과에 하지 않은 말이 섞여 있으면 언어를 고정하고 다시 돌리세요."
             )
 
-    # ── 4) 조각 합치기 ────────────────────────────────────────────────
+    # ── 4) 조각 합치기 + 과분할된 화자 다시 묶기 ──────────────────────
+    # 둘 다 싸고, 임계값을 바꿔 다시 돌려보고 싶은 단계라 캐시하지 않는다.
     all_segments.sort(key=lambda seg: (seg.get("start", 0.0), seg.get("end", 0.0)))
     if len(parts) == 1:
-        turns, embeddings, speech_sec = parts[0]
+        turns, embeddings, speech_sec, overlaps = parts[0]
     else:
-        # 합치는 건 싸고, 임계값을 바꿔 다시 돌려보고 싶은 단계라 캐시하지 않는다
         progress("조각 이어 붙이는 중", 89)
-        turns, embeddings, speech_sec, notes = stitch.merge(parts)
+        turns, embeddings, speech_sec, overlaps, notes = stitch.merge(parts)
         warnings.append(stitch.summary(len(parts), len(speech_sec)))
         for note in notes:
             print(f"[화자 이어붙이기] {note}", flush=True)
+
+    # pyannote 는 한 사람을 여러 화자로 쪼개는 일이 잦다. 조각을 나눴든 아니든
+    # 마지막에 한 번 더 대조해 묶는다. 동시에 말한 쌍은 절대 묶지 않는다.
+    progress("같은 화자 다시 묶는 중", 90)
+    turns, embeddings, speech_sec, merges = stitch.collapse(
+        turns, embeddings, speech_sec, overlaps
+    )
+    if merges:
+        warnings.append(stitch.collapse_summary(merges, len(speech_sec)))
+        for note in merges:
+            print(f"[화자 병합] {note}", flush=True)
     segments = all_segments
 
     # ── 5) 환각 걸러내기 ──────────────────────────────────────────────
@@ -350,6 +364,7 @@ def run(
         ] if len(pieces) > 1 else [],
         "dropped": dropped,
         "suspect": suspect,
+        "merged_speakers": merges,
         "warnings": warnings,
         "reused_stages": reused,
         "speakers": speakers,

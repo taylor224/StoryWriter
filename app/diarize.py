@@ -8,7 +8,7 @@ whisperx 의 DiarizationPipeline 래퍼 대신 pyannote 를 직접 호출한다.
 import bisect
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -97,18 +97,46 @@ def _build_pipeline():
     return pipeline
 
 
+class Diarization(NamedTuple):
+    turns: list[dict]                      # [{'start','end','speaker'}] 시작 시각 오름차순
+    embeddings: dict[str, np.ndarray]      # {'SPEAKER_00': (256,)} — 없는 화자도 있다
+    speech_sec: dict[str, float]           # {'SPEAKER_00': 총 발화 초}
+    overlaps: list[list[str]]              # 동시에 말한 화자 쌍 — 같은 사람일 수 없다
+
+
+def _overlapping_pairs(annotation, minimum: float) -> list[list[str]]:
+    """동시에 말한 화자 쌍을 뽑는다.
+
+    두 라벨이 겹쳐서 말했다면 같은 사람일 수 없다. 나중에 화자를 자동으로
+    다시 묶을 때(stitch.collapse) 이게 유일하게 확실한 반증이라 여기서 챙긴다.
+
+    경계에서 몇십 ms 스치는 건 무시한다 — 그건 겹쳐 말한 게 아니라 분할 오차다.
+    """
+    spans = sorted(
+        (float(seg.start), float(seg.end), str(label))
+        for seg, _, label in annotation.itertracks(yield_label=True)
+    )
+    shared: dict[tuple[str, str], float] = {}
+    active: list[tuple[float, str]] = []
+    for start, end, label in spans:
+        active = [item for item in active if item[0] > start]
+        for other_end, other in active:
+            if other == label:
+                continue  # 한 화자가 여러 트랙에 걸친 것뿐이다
+            pair = (label, other) if label < other else (other, label)
+            shared[pair] = shared.get(pair, 0.0) + min(end, other_end) - start
+        active.append((end, label))
+    return [list(pair) for pair, seconds in shared.items() if seconds >= minimum]
+
+
 def diarize(
     wav_path: Path,
     num_speakers: int | None = None,
     min_speakers: int | None = None,
     max_speakers: int | None = None,
     timeline: "vad.Timeline | None" = None,
-) -> tuple[list[dict], dict[str, np.ndarray], dict[str, float]]:
-    """반환: (turns, embeddings, speech_sec)
-
-    turns      : [{'start', 'end', 'speaker'}] 시작 시각 오름차순
-    embeddings : {'SPEAKER_00': np.ndarray(256,)}  — 값이 없는 화자는 빠질 수 있음
-    speech_sec : {'SPEAKER_00': 총 발화 초}
+) -> Diarization:
+    """화자 분리 결과.
 
     timeline 을 주면 무음을 들어낸 파형으로 돌리되 turns 는 원본 시각으로
     되돌려 내보낸다. 호출부는 항상 원본 기준 결과만 본다.
@@ -161,7 +189,9 @@ def diarize(
             if vec.size and np.isfinite(vec).all() and vec.any():
                 embeddings[str(label)] = vec
 
-    return turns, embeddings, speech
+    # 겹침이 살아 있는 full 에서 뽑아야 한다. exclusive 는 겹침을 지운 결과다.
+    overlaps = _overlapping_pairs(full, config.MERGE_MIN_OVERLAP_SEC)
+    return Diarization(turns, embeddings, speech, overlaps)
 
 
 def _restore_turns(turns: list[dict], timeline: "vad.Timeline") -> list[dict]:
@@ -320,7 +350,8 @@ def attach_speakers(segments: list[dict], turns: list[dict]) -> list[dict]:
 
 def embed_single_speaker(wav_path: Path) -> tuple[np.ndarray, float]:
     """등록용 샘플 오디오에서 화자 임베딩 하나를 뽑는다 (1인 발화 가정)."""
-    turns, embeddings, speech = diarize(wav_path, num_speakers=1)
+    result = diarize(wav_path, num_speakers=1)
+    embeddings, speech = result.embeddings, result.speech_sec
     if not embeddings:
         raise RuntimeError(
             "샘플에서 화자 임베딩을 추출하지 못했습니다. 10초 이상, "
