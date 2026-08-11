@@ -1,7 +1,8 @@
-"""WhisperX 전사 + wav2vec2 강제정렬.
+"""WhisperX transcription plus wav2vec2 forced alignment.
 
-모델은 첫 사용 시 로드해서 프로세스에 상주시킨다 (재로딩 20~30초 낭비 방지).
-VRAM 이 모자라면 config.UNLOAD_BETWEEN_STAGES=true 로 단계마다 내린다.
+Models load on first use and stay resident in the process (reloading wastes
+20-30 seconds every time). Set config.UNLOAD_BETWEEN_STAGES=true to release them
+between stages when VRAM is tight.
 """
 
 import gc
@@ -32,14 +33,14 @@ def load_audio(path):
     return whisperx.load_audio(str(path))
 
 
-# ── Whisper 본체 ──────────────────────────────────────────────────────
+# ── Whisper itself ────────────────────────────────────────────────────
 def get_model():
     global _model
     with _lock:
         if _model is None:
             import whisperx
 
-            device = config.asr_device()  # CTranslate2 는 MPS 를 못 쓴다
+            device = config.asr_device()  # CTranslate2 cannot use MPS
             _model = whisperx.load_model(
                 config.WHISPER_MODEL,
                 device=device,
@@ -56,9 +57,10 @@ def unload_model() -> None:
 
 
 def _apply_initial_prompt(model, prompt: str | None) -> None:
-    """잡마다 프롬프트가 바뀌므로 모델 재로딩 없이 옵션만 교체한다.
+    """Swap just the options instead of reloading the model, since the prompt changes per job.
 
-    whisperx 버전에 따라 model.options 가 NamedTuple 이거나 dataclass 라서 둘 다 시도.
+    Depending on the whisperx version model.options is either a NamedTuple or a
+    dataclass, so try both.
     """
     options = getattr(model, "options", None)
     if options is None:
@@ -94,13 +96,14 @@ def _detect_window(model, chunk) -> tuple[str, float]:
 
 
 def detect_language(audio) -> tuple[str, float, dict[str, float]]:
-    """오디오 여러 지점을 표본으로 언어를 정한다.
+    """Decide the language by sampling several points in the audio.
 
-    whisperx 기본 감지는 첫 30초만 본다(asr.py 의 audio[: N_SAMPLES]). 녹음
-    시작이 침묵이거나 짧은 영어 인사말이면 파일 전체가 엉뚱한 언어로 강제
-    디코딩되고, Whisper 는 하지도 않은 말을 그럴듯하게 지어낸다.
+    whisperx's own detection looks only at the first 30 seconds (audio[: N_SAMPLES]
+    in its asr.py). If the recording opens with silence or a short English
+    greeting, the entire file gets force-decoded in the wrong language and
+    Whisper confidently invents things nobody said.
 
-    반환: (언어, 확신도 0~1, 언어별 득표)
+    Returns: (language, confidence 0-1, votes per language)
     """
     import numpy as np
     from whisperx.audio import N_SAMPLES
@@ -111,7 +114,7 @@ def detect_language(audio) -> tuple[str, float, dict[str, float]]:
     if total <= N_SAMPLES:
         starts = [0]
     else:
-        # 앞뒤 끝을 피해 고르게 표본을 잡는다
+        # Sample evenly, staying away from the very start and end
         span = total - N_SAMPLES
         starts = [
             int(span * ratio)
@@ -124,14 +127,14 @@ def detect_language(audio) -> tuple[str, float, dict[str, float]]:
         chunk = audio[start : start + N_SAMPLES]
         if chunk.shape[0] < SAMPLE_RATE:
             continue
-        # 거의 무음인 구간은 감지가 제멋대로다. 이런 표본이 전체를 망친다.
+        # Detection is arbitrary on near-silent windows, and one such sample ruins the file.
         if float(np.sqrt(np.mean(np.square(chunk)))) < LANG_SILENCE_RMS:
             continue
         language, probability = _detect_window(model, chunk)
         votes[language] = votes.get(language, 0.0) + probability
         counted += 1
 
-    if not votes:  # 전부 무음으로 걸러진 경우 — 원래 방식으로 한 번
+    if not votes:  # everything got filtered as silence — fall back to the default way
         language, probability = _detect_window(model, audio)
         return language, probability, {language: probability}
 
@@ -141,7 +144,7 @@ def detect_language(audio) -> tuple[str, float, dict[str, float]]:
 
 
 def transcribe(audio, language: str | None = None, initial_prompt: str | None = None) -> dict:
-    """{'segments': [...], 'language': 'ko', ...} 반환. language=None 이면 자동 감지."""
+    """Returns {'segments': [...], 'language': 'ko', ...}. language=None auto-detects."""
     model = get_model()
     _apply_initial_prompt(model, initial_prompt)
 
@@ -150,9 +153,9 @@ def transcribe(audio, language: str | None = None, initial_prompt: str | None = 
         language, confidence, votes = detect_language(audio)
         detection = {"auto": True, "confidence": confidence, "votes": votes}
 
-    # 언어를 항상 명시해서 넘긴다. whisperx 는 토크나이저를 모델 인스턴스에
-    # 캐시해 두고, language 를 안 주면 직전 파일의 언어를 그대로 재사용한다.
-    # 모델을 상주시키는 구조에서는 두 번째 파일부터 조용히 틀어진다.
+    # Always pass the language explicitly. whisperx caches the tokenizer on the
+    # model instance and, without a language, reuses whatever the previous file
+    # used. With a resident model that silently breaks from the second file on.
     kwargs: dict[str, Any] = {
         "batch_size": max(1, config.BATCH_SIZE),
         "language": language,
@@ -163,7 +166,7 @@ def transcribe(audio, language: str | None = None, initial_prompt: str | None = 
     except RuntimeError as exc:
         if "out of memory" not in str(exc).lower() or kwargs["batch_size"] <= 1:
             raise
-        # OOM 이면 배치를 반으로 줄여 한 번 더
+        # On OOM, halve the batch and try once more
         free_vram()
         kwargs["batch_size"] = max(1, kwargs["batch_size"] // 2)
         result = model.transcribe(audio, **kwargs)
@@ -173,7 +176,7 @@ def transcribe(audio, language: str | None = None, initial_prompt: str | None = 
     return result
 
 
-# ── 강제 정렬 (단어 단위 타임스탬프) ────────────────────────────────────
+# ── Forced alignment (word-level timestamps) ──────────────────────────
 def get_align_model(language: str):
     with _lock:
         if language not in _align_cache:
@@ -192,9 +195,9 @@ def unload_align_models() -> None:
 
 
 def align(segments: list[dict], language: str, audio) -> tuple[list[dict], str | None]:
-    """정렬된 세그먼트를 반환. 해당 언어의 정렬 모델이 없으면 원본을 그대로 돌려준다.
+    """Return aligned segments, or the originals when no aligner exists for the language.
 
-    반환: (segments, warning_or_None)
+    Returns: (segments, warning_or_None)
     """
     if not segments:
         return segments, None
@@ -202,10 +205,10 @@ def align(segments: list[dict], language: str, audio) -> tuple[list[dict], str |
 
     try:
         model, metadata = get_align_model(language)
-    except Exception as exc:  # 지원하지 않는 언어 등
+    except Exception as exc:  # unsupported language, etc.
         return segments, (
-            f"'{language}' 언어의 단어 정렬 모델을 불러오지 못해 문장 단위로만 "
-            f"화자를 배정했습니다. ({exc})"
+            f"Could not load a word-alignment model for '{language}', so speakers were "
+            f"assigned per sentence only. ({exc})"
         )
 
     out = whisperx.align(

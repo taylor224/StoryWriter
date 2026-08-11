@@ -1,4 +1,4 @@
-"""백그라운드 작업 큐. GPU 가 하나뿐이라 워커 스레드도 하나만 돌린다."""
+"""Background job queue. One GPU means one worker thread."""
 
 import queue
 import threading
@@ -23,7 +23,7 @@ def start() -> None:
 
 
 def submit(job_id: int, source: Path, params: dict[str, Any]) -> None:
-    db.update_job(job_id, status="queued", stage="대기 중", progress=0)
+    db.update_job(job_id, status="queued", stage="Queued", progress=0)
     _queue.put((job_id, Path(source), params))
     start()
 
@@ -37,38 +37,38 @@ def current_job_id() -> int | None:
 
 
 def friendly_error(exc: BaseException) -> str:
-    """스택트레이스 대신 원인과 해결책을 보여준다."""
+    """Show the cause and the fix instead of a stack trace."""
     if isinstance(exc, (diarize.DiarizationSetupError, audio.FFmpegMissing)):
         return str(exc)
     text = str(exc)
     lowered = text.lower()
     if "out of memory" in lowered:
         return (
-            "GPU 메모리가 부족합니다. .env 의 BATCH_SIZE 를 4 로 낮추거나 "
-            "UNLOAD_BETWEEN_STAGES=true 로 설정한 뒤 다시 시도하세요.\n\n"
-            f"원본 오류: {text}"
+            "Out of GPU memory. Lower BATCH_SIZE to 4 in .env, or set "
+            "UNLOAD_BETWEEN_STAGES=true, then try again.\n\n"
+            f"Original error: {text}"
         )
     if "cudnn" in lowered or "cublas" in lowered:
         return (
-            "CUDA/cuDNN 라이브러리를 불러오지 못했습니다. torch 를 2.4 이상 CUDA 휠로 "
-            "재설치하세요:\n"
+            "Could not load the CUDA/cuDNN libraries. Reinstall torch 2.4+ from the "
+            "CUDA wheel index:\n"
             "  pip install -U torch torchaudio --index-url https://download.pytorch.org/whl/cu128\n\n"
-            f"원본 오류: {text}"
+            f"Original error: {text}"
         )
-    if "1314" in text or "심볼릭" in text or "symbolic link" in lowered:
+    if "1314" in text or "symlink" in lowered or "symbolic link" in lowered:
         return (
-            "모델 캐시를 만들다가 Windows 심볼릭 링크 권한에서 막혔습니다.\n"
-            "다음 순서로 해결하세요.\n\n"
-            "  1) models 폴더를 통째로 지우고 다시 실행하세요.\n"
-            "     최신 버전은 심링크를 쓰지 않도록 설정되어 있어 보통 이걸로 끝납니다.\n"
-            "  2) 그래도 나면 프로젝트를 바탕화면 대신 C:\\StoryWriter 처럼\n"
-            "     OneDrive 동기화가 걸리지 않는 경로로 옮기세요.\n"
-            "  3) 또는 Windows 설정 > 개인 정보 및 보안 > 개발자용 에서\n"
-            "     개발자 모드를 켜세요.\n\n"
-            f"원본 오류: {text}"
+            "Blocked by Windows symlink permissions while building the model cache.\n"
+            "Try these in order.\n\n"
+            "  1) Delete the whole models folder and run again.\n"
+            "     Recent versions avoid symlinks entirely, so this usually ends it.\n"
+            "  2) If it persists, move the project off the Desktop to a path with no\n"
+            "     OneDrive sync, such as C:\\StoryWriter.\n"
+            "  3) Or turn on Developer Mode under Windows Settings >\n"
+            "     Privacy & security > For developers.\n\n"
+            f"Original error: {text}"
         )
     if "401" in text or "403" in text or "gated" in lowered:
-        return diarize.GATE_HELP + f"\n\n원본 오류: {text}"
+        return diarize.GATE_HELP + f"\n\nOriginal error: {text}"
     return f"{type(exc).__name__}: {text}"
 
 
@@ -79,12 +79,12 @@ def _loop() -> None:
         _current_job_id = job_id
         try:
             _run(job_id, source, params)
-        except Exception as exc:  # noqa: BLE001 - 워커는 절대 죽으면 안 됨
+        except Exception as exc:  # noqa: BLE001 - the worker must never die
             traceback.print_exc()
             db.update_job(
                 job_id,
                 status="error",
-                stage="실패",
+                stage="Failed",
                 error=friendly_error(exc),
                 finished_at=db.now(),
             )
@@ -94,7 +94,7 @@ def _loop() -> None:
 
 
 def _run(job_id: int, source: Path, params: dict[str, Any]) -> None:
-    db.update_job(job_id, status="running", stage="시작", progress=1, error="")
+    db.update_job(job_id, status="running", stage="Starting", progress=1, error="")
 
     def report(stage: str, percent: float) -> None:
         db.update_job(job_id, stage=stage, progress=float(percent))
@@ -113,5 +113,5 @@ def _run(job_id: int, source: Path, params: dict[str, Any]) -> None:
     )
 
     db.update_job(
-        job_id, status="done", stage="완료", progress=100, finished_at=db.now()
+        job_id, status="done", stage="Done", progress=100, finished_at=db.now()
     )

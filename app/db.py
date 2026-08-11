@@ -1,7 +1,8 @@
-"""SQLite 저장소: 화자 / 보이스프린트 / 작업 / 설정.
+"""SQLite store: speakers / voiceprints / jobs / settings.
 
-임베딩은 float32 256차원을 L2 정규화한 뒤 raw bytes 로 BLOB 저장한다.
-연결은 호출마다 새로 열고 닫는다 (워커 스레드 + FastAPI 스레드 동시 접근 대응).
+Embeddings are L2-normalized float32 vectors stored as raw bytes in a BLOB.
+Connections are opened and closed per call, since the worker thread and the
+FastAPI threads both touch the database.
 """
 
 import json
@@ -80,7 +81,7 @@ def init() -> None:
         conn.executescript(SCHEMA)
 
 
-# ── 벡터 직렬화 ────────────────────────────────────────────────────────
+# ── Vector serialization ──────────────────────────────────────────────
 def normalize(vec) -> np.ndarray:
     v = np.asarray(vec, dtype=np.float32).ravel()
     n = float(np.linalg.norm(v))
@@ -95,7 +96,7 @@ def unpack(blob: bytes) -> np.ndarray:
     return np.frombuffer(blob, dtype=np.float32)
 
 
-# ── 화자 ──────────────────────────────────────────────────────────────
+# ── Speakers ──────────────────────────────────────────────────────────
 def list_speakers() -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
@@ -127,10 +128,10 @@ def get_speaker_by_name(name: str) -> dict[str, Any] | None:
 
 
 def upsert_speaker(name: str, note: str = "") -> int:
-    """이름으로 화자를 찾고 없으면 만든다. 화자 id 반환."""
+    """Find a speaker by name, creating them if absent. Returns the speaker id."""
     name = name.strip()
     if not name:
-        raise ValueError("화자 이름이 비어 있습니다.")
+        raise ValueError("Speaker name is empty.")
     existing = get_speaker_by_name(name)
     if existing:
         return int(existing["id"])
@@ -145,7 +146,7 @@ def upsert_speaker(name: str, note: str = "") -> int:
 def rename_speaker(speaker_id: int, name: str) -> None:
     name = name.strip()
     if not name:
-        raise ValueError("화자 이름이 비어 있습니다.")
+        raise ValueError("Speaker name is empty.")
     with _write_lock, connect() as conn:
         conn.execute(
             "UPDATE speakers SET name=?, updated_at=? WHERE id=?",
@@ -158,9 +159,9 @@ def delete_speaker(speaker_id: int) -> None:
         conn.execute("DELETE FROM speakers WHERE id=?", (speaker_id,))
 
 
-# ── 보이스프린트 ───────────────────────────────────────────────────────
+# ── Voiceprints ───────────────────────────────────────────────────────
 def add_voiceprint(speaker_id: int, vector, source: str = "", speech_sec: float = 0.0) -> None:
-    """벡터 추가 후 화자당 MAX_VOICEPRINTS 개만 남기고 오래된 것부터 삭제."""
+    """Add a vector, then trim to MAX_VOICEPRINTS per speaker, oldest first."""
     blob = pack(vector)
     with _write_lock, connect() as conn:
         conn.execute(
@@ -182,7 +183,7 @@ def add_voiceprint(speaker_id: int, vector, source: str = "", speech_sec: float 
 
 
 def load_profiles() -> list[dict[str, Any]]:
-    """매칭용 프로필 목록: [{id, name, vectors: np.ndarray (n, dim)}]"""
+    """Profiles for matching: [{id, name, vectors: np.ndarray (n, dim)}]"""
     with connect() as conn:
         rows = conn.execute(
             """SELECT s.id, s.name, v.vector
@@ -202,7 +203,7 @@ def load_profiles() -> list[dict[str, Any]]:
         vecs = entry.pop("_vecs")
         dims = {v.shape[0] for v in vecs}
         if len(dims) > 1:
-            # 임베딩 모델이 바뀐 경우 — 최신 차원만 사용
+            # The embedding model changed — keep only the newest dimensionality
             latest_dim = vecs[-1].shape[0]
             vecs = [v for v in vecs if v.shape[0] == latest_dim]
         entry["vectors"] = np.vstack(vecs)
@@ -220,17 +221,17 @@ def voiceprints_of(speaker_id: int) -> list[dict[str, Any]]:
 
 
 def delete_voiceprints_from_source(source: str) -> None:
-    """같은 결과에서 두 번 등록되는 것을 막기 위해 기존 항목 제거."""
+    """Remove existing entries so the same result cannot enroll twice."""
     with _write_lock, connect() as conn:
         conn.execute("DELETE FROM voiceprints WHERE source=?", (source,))
 
 
-# ── 작업 ──────────────────────────────────────────────────────────────
+# ── Jobs ──────────────────────────────────────────────────────────────
 def create_job(name: str, filename: str, params: dict[str, Any]) -> int:
     with _write_lock, connect() as conn:
         cur = conn.execute(
             """INSERT INTO jobs (name, filename, status, stage, progress, params, created_at)
-               VALUES (?,?,'queued','대기 중',0,?,?)""",
+               VALUES (?,?,'queued','Queued',0,?,?)""",
             (name, filename, json.dumps(params, ensure_ascii=False), now()),
         )
         return int(cur.lastrowid)
@@ -259,17 +260,17 @@ def list_jobs(limit: int = 50) -> list[dict[str, Any]]:
 
 
 def reset_stale_jobs() -> None:
-    """서버가 작업 도중 죽었으면 running 상태가 남는다. 시작 시 정리."""
+    """A crash mid-job leaves rows stuck in running. Clean them up at startup."""
     with _write_lock, connect() as conn:
         conn.execute(
-            """UPDATE jobs SET status='error', error='서버가 재시작되어 작업이 중단되었습니다.',
+            """UPDATE jobs SET status='error', error='The server restarted, so this job was interrupted.',
                                finished_at=? WHERE status IN ('queued','running')""",
             (now(),),
         )
 
 
 def name_taken(name: str) -> bool:
-    """아직 결과 파일이 없는 대기/진행 중 작업이 이 이름을 쓰고 있는지."""
+    """Is a queued or running job already using this name (no result file yet)?"""
     with connect() as conn:
         row = conn.execute(
             "SELECT 1 FROM jobs WHERE name=? AND status IN ('queued','running') LIMIT 1",
@@ -278,7 +279,7 @@ def name_taken(name: str) -> bool:
     return row is not None
 
 
-# ── 설정 ──────────────────────────────────────────────────────────────
+# ── Settings ──────────────────────────────────────────────────────────
 def get_setting(key: str, default: str = "") -> str:
     with connect() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()

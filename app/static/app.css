@@ -119,7 +119,7 @@ button.danger { color: var(--err); }
 .dz-sub { margin: 0; font-size: 12px; color: var(--muted); }
 .dz-file { margin: 10px 0 0; font-weight: 600; color: var(--accent); }
 
-/* 작업 목록 */
+/* Job list */
 .joblist .job, .resultlist .result-row {
   display: flex;
   align-items: center;
@@ -144,7 +144,7 @@ button.danger { color: var(--err); }
 .chips { display: flex; gap: 5px; flex-wrap: wrap; }
 .chip { background: var(--chip); color: var(--chip-ink); border-radius: 20px; padding: 1px 9px; font-size: 12px; }
 
-/* 결과 페이지 */
+/* Result page */
 .result-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
 .result-head h2 { margin: 0; }
 .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -190,7 +190,7 @@ small.hint { margin: 4px 0 16px 22px; }
 .line .who:hover { text-decoration: underline; }
 .line .time { flex: 0 0 auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
-/* 말한 내용 자체가 재생 버튼이다 — 누르면 그 구간만 들려준다 */
+/* The spoken text is itself the play button — click it to hear just that span */
 .line .said {
   flex: 1;
   white-space: pre-wrap;
@@ -211,7 +211,7 @@ small.hint { margin: 4px 0 16px 22px; }
 }
 .line.failed .said { text-decoration: underline wavy var(--warn, #c60); }
 
-/* 화자 관리 */
+/* Speaker management */
 .inline-form { display: flex; gap: 10px; align-items: center; }
 .inline-form input { margin: 0; }
 .sp-card { border-top: 1px solid var(--line); padding: 14px 0; }

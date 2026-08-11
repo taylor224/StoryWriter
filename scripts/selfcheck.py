@@ -1,12 +1,14 @@
-"""모델 없이 돌릴 수 있는 부분을 전부 점검한다.
+"""Check everything that can run without a model.
 
     python scripts/selfcheck.py
 
-무음 제거 · 조각 나누기 · 조각 간 화자 이어붙이기 · 환각 필터. 합성 데이터로
-돌리므로 모델도 GPU 도 필요 없다 (numpy/scipy 만 있으면 된다).
+Silence removal, chunking, cross-chunk speaker stitching, speaker re-merging and
+the hallucination filter. It all runs on synthetic data, so no model and no GPU
+are needed (numpy and scipy are enough).
 
-vad.py / stitch.py / cleanup.py 를 손대면 이걸 먼저 돌릴 것. 특히 타임스탬프
-쪽이 깨지면 결과의 모든 시각이 조용히 어긋난다 — 눈으로는 알아채기 힘들다.
+Run this first whenever you touch vad.py / stitch.py / cleanup.py. The timestamp
+side especially: if that breaks, every time in the output is silently wrong —
+the kind of failure you cannot spot by eye.
 """
 
 import sys
@@ -30,7 +32,7 @@ def check(label: str, ok: bool, detail: str = "") -> None:
 
 
 def speech(sec: float, amp: float = 0.25) -> np.ndarray:
-    """대역 제한 잡음 + 음절 리듬. 순수 사인파보다 사람 목소리에 가깝다."""
+    """Band-limited noise with a syllable rhythm. Closer to a voice than a pure sine."""
     count = int(sec * SR)
     kernel = np.hanning(51)
     band = np.convolve(rng.normal(0, 1, count), kernel / kernel.sum(), mode="same")
@@ -39,12 +41,12 @@ def speech(sec: float, amp: float = 0.25) -> np.ndarray:
 
 
 def room(sec: float, amp: float = 0.001) -> np.ndarray:
-    """실제 녹음의 조용한 구간. 완전한 0 이 아니라 미세한 잡음이 깔린다."""
+    """A quiet stretch of a real recording — faint noise, never a true zero."""
     return rng.normal(0, amp, int(sec * SR)).astype(np.float32)
 
 
-# ── 말 / 침묵을 섞은 57.5초 ────────────────────────────────────────────
-layout = [("말", 3.0), ("", 12.0), ("말", 4.0), ("", 1.5), ("말", 2.0), ("", 30.0), ("말", 5.0)]
+# ── 57.5 seconds of speech mixed with silence ─────────────────────────
+layout = [("talk", 3.0), ("", 12.0), ("talk", 4.0), ("", 1.5), ("talk", 2.0), ("", 30.0), ("talk", 5.0)]
 parts, spoken, cursor = [], [], 0.0
 for kind, seconds in layout:
     parts.append(speech(seconds) if kind else room(seconds))
@@ -55,105 +57,105 @@ audio = np.concatenate(parts)
 
 timeline, note = vad.plan(audio)
 stats = timeline.stats()
-print(f"\n원본 {stats['original']}초 -> 전사 대상 {stats['kept']}초 "
-      f"(무음 {stats['removed']}초 제거, 구간 {stats['regions']}개)")
+print(f"\noriginal {stats['original']}s -> {stats['kept']}s to transcribe "
+      f"({stats['removed']}s of silence removed across {stats['regions']} regions)")
 if note:
     print(f"       {note}")
 print()
 
-check("긴 침묵을 잘라냈다", timeline.trimmed, f"{stats['removed']}초")
-check("발화 구간 수가 맞다", stats["regions"] == 4, f"{stats['regions']}개")
+check("long silence was cut", timeline.trimmed, f"{stats['removed']}s")
+check("speech region count is right", stats["regions"] == 4, f"{stats['regions']}")
 
 trimmed = timeline.apply(audio)
 check(
-    "잘라낸 파형 = 남긴 구간을 이어 붙인 것",
+    "trimmed waveform == kept regions concatenated",
     np.array_equal(trimmed, np.concatenate([audio[s:e] for s, e in timeline.regions])),
 )
 
-# ── 핵심: 잘린 쪽 시각을 되돌리면 원본의 같은 샘플을 가리키는가 ────────
+# ── The core question: does a trimmed-clock time map to the same sample? ──
 worst = 0.0
 for index in rng.integers(0, len(trimmed), 20000):
     back = int(round(timeline.to_original(index / SR) * SR))
     worst = max(worst, abs(float(audio[min(back, len(audio) - 1)] - trimmed[index])))
-check("무작위 20000개 지점의 시각 복원이 샘플 단위로 정확", worst == 0.0, f"오차 {worst:.1e}")
+check("20000 random points map back sample-exactly", worst == 0.0, f"max error {worst:.1e}")
 
 probe = [timeline.to_original(t) for t in np.linspace(-1.0, stats["kept"] + 5.0, 5000)]
-check("복원이 단조 증가 (순서가 뒤집히지 않는다)",
+check("mapping is monotonic (order never flips)",
       all(b >= a - 1e-9 for a, b in zip(probe, probe[1:])))
-check("복원 결과가 원본 길이를 벗어나지 않는다",
+check("mapped times stay inside the original length",
       probe[0] >= 0.0 and probe[-1] <= stats["original"] + 1e-9)
 
-# ── 말을 잘라먹지 않았는가 ────────────────────────────────────────────
+# ── Did we chop off any speech? ───────────────────────────────────────
 kept = np.zeros(len(audio), dtype=bool)
 for start, end in timeline.regions:
     kept[start:end] = True
 for start_sec, end_sec in spoken:
     covered = float(kept[int(start_sec * SR):int(end_sec * SR)].mean())
-    check(f"발화 {start_sec:5.1f}~{end_sec:5.1f}초 보존", covered > 0.97, f"{covered * 100:.1f}%")
+    check(f"speech {start_sec:5.1f}-{end_sec:5.1f}s preserved", covered > 0.97, f"{covered * 100:.1f}%")
 
-# ── 잘린 자리를 넘는 구간은 쪼개진다 (화자 구간용) ────────────────────
-# 쪼개지 않으면 그 화자가 없앤 침묵까지 차지한다.
+# ── Spans crossing a cut get split (used for speaker turns) ───────────
+# Without the split a speaker would own the silence we removed.
 cut = vad.Timeline([(0, 2 * SR), (10 * SR, 14 * SR)], 14 * SR)
-check("구간이 한 조각 안에 있으면 그대로", cut.split(1.0, 1.5) == [(1.0, 1.5)], str(cut.split(1.0, 1.5)))
+check("a span inside one region passes through unchanged", cut.split(1.0, 1.5) == [(1.0, 1.5)], str(cut.split(1.0, 1.5)))
 
 crossing = cut.split(1.5, 3.0)
-check("잘린 자리를 넘는 구간은 쪼개진다", crossing == [(1.5, 2.0), (10.0, 11.0)], str(crossing))
-check("쪼개도 길이 합은 보존된다",
+check("a span crossing a cut gets split", crossing == [(1.5, 2.0), (10.0, 11.0)], str(crossing))
+check("splitting preserves total length",
       abs(sum(b - a for a, b in crossing) - 1.5) < 1e-9,
-      f"{sum(b - a for a, b in crossing):.3f}초")
-check("쪼갠 조각은 전부 남긴 구간 안에 있다",
+      f"{sum(b - a for a, b in crossing):.3f}s")
+check("every split piece lies inside a kept region",
       all(any(r[0] / SR <= a and b <= r[1] / SR for r in cut.regions) for a, b in crossing))
-check("전체 구간을 쪼개면 남긴 구간 전부",
+check("splitting the whole span yields every kept region",
       cut.split(0.0, 6.0) == [(0.0, 2.0), (10.0, 14.0)], str(cut.split(0.0, 6.0)))
-check("항등 Timeline 에서 split 은 그대로", vad.Timeline.identity(0).split(3.0, 9.0) == [(3.0, 9.0)])
+check("split is a no-op on the identity Timeline", vad.Timeline.identity(0).split(3.0, 9.0) == [(3.0, 9.0)])
 
-# 화자 구간 복원 — diarize._restore_turns 가 하는 일 그대로
-from app import diarize  # noqa: E402  (torch 를 끌고 오므로 여기서 import)
+# Restoring speaker turns — exactly what diarize._restore_turns does
+from app import diarize  # noqa: E402  (imported here because it pulls in torch)
 
 turns = diarize._restore_turns(
     [{"start": 0.5, "end": 3.0, "speaker": "SPEAKER_00"},
      {"start": 3.0, "end": 4.0, "speaker": "SPEAKER_01"}],
     cut,
 )
-check("화자 구간이 침묵을 삼키지 않는다", len(turns) == 3, f"{len(turns)}개")
-check("총 발화 시간은 그대로",
+check("speaker turns do not swallow removed silence", len(turns) == 3, f"{len(turns)}")
+check("total speech time is unchanged",
       abs(sum(t["end"] - t["start"] for t in turns) - 3.5) < 1e-9,
-      f"{sum(t['end'] - t['start'] for t in turns):.2f}초")
-check("화자 라벨이 유지된다",
+      f"{sum(t['end'] - t['start'] for t in turns):.2f}s")
+check("speaker labels are preserved",
       [t["speaker"] for t in turns] == ["SPEAKER_00", "SPEAKER_00", "SPEAKER_01"],
       str([t["speaker"] for t in turns]))
 
-# ── 세그먼트·단어 복원 ────────────────────────────────────────────────
+# ── Restoring segment and word times ──────────────────────────────────
 segments = [
     {"start": 2.3, "end": 4.0, "words": [
-        {"word": "가", "start": 2.3, "end": 3.0},
-        {"word": "125", "start": None, "end": None},  # 정렬이 붙이지 못한 단어
+        {"word": "hello", "start": 2.3, "end": 3.0},
+        {"word": "125", "start": None, "end": None},  # a word the aligner could not place
     ]},
 ]
 vad.Timeline([(0, 2 * SR), (10 * SR, 14 * SR)], 14 * SR).restore(segments)
-check("세그먼트 시각 복원", abs(segments[0]["start"] - 10.3) < 1e-6 and
+check("segment times restored", abs(segments[0]["start"] - 10.3) < 1e-6 and
       abs(segments[0]["end"] - 12.0) < 1e-6, str(segments[0]["start"]))
-check("단어 시각 복원", abs(segments[0]["words"][0]["start"] - 10.3) < 1e-6)
-check("타임스탬프 없는 단어는 건드리지 않는다", segments[0]["words"][1]["start"] is None)
+check("word times restored", abs(segments[0]["words"][0]["start"] - 10.3) < 1e-6)
+check("words without timestamps are left alone", segments[0]["words"][1]["start"] is None)
 
-# ── 자르면 안 되는 경우들 ─────────────────────────────────────────────
+# ── Cases where nothing should be cut ─────────────────────────────────
 identity = vad.Timeline.identity(len(audio))
-check("항등 Timeline 은 파형을 복사하지 않는다", identity.apply(audio) is audio)
-check("항등 Timeline 은 시각을 건드리지 않는다", identity.to_original(3.25) == 3.25)
-check("항등 Timeline 도 길이를 제대로 보고한다",
+check("identity Timeline does not copy the waveform", identity.apply(audio) is audio)
+check("identity Timeline leaves times untouched", identity.to_original(3.25) == 3.25)
+check("identity Timeline reports lengths correctly",
       identity.stats()["kept"] == identity.stats()["original"], str(identity.stats()))
-check("잡음만 있으면 자르지 않는다",
+check("pure noise is never cut",
       not vad.plan(rng.normal(0, 0.05, 10 * SR).astype(np.float32))[0].trimmed)
-check("무음만 있으면 자르지 않는다", not vad.plan(room(10))[0].trimmed)
-check("1초 미만 파일은 자르지 않는다", not vad.plan(speech(0.5))[0].trimmed)
-check("짧은 침묵(0.4초)은 말의 일부로 보고 남긴다",
+check("pure silence is never cut", not vad.plan(room(10))[0].trimmed)
+check("files under a second are never cut", not vad.plan(speech(0.5))[0].trimmed)
+check("short silence (0.4s) is kept as part of speech",
       not vad.plan(np.concatenate([speech(1), room(0.4), speech(1)]))[0].trimmed)
-check("긴 침묵(3초)은 잘라낸다",
+check("long silence (3s) is cut",
       vad.plan(np.concatenate([speech(1), room(3.0), speech(1)]))[0].trimmed)
 
-# ── 잘린 발화끼리 맞붙지 않는가 ───────────────────────────────────────
-# 맞붙으면 Whisper 가 서로 다른 두 발화를 한 문장으로 읽는다.
-original_pad, config.TRIM_PAD_SEC = config.TRIM_PAD_SEC, 0.0  # 최악의 설정으로
+# ── Do trimmed utterances end up butted together? ─────────────────────
+# If they do, Whisper reads two separate utterances as one sentence.
+original_pad, config.TRIM_PAD_SEC = config.TRIM_PAD_SEC, 0.0  # worst-case setting
 try:
     gapped = np.concatenate([speech(1), room(3.0), speech(1)])
     joined = vad.plan(gapped)[0]
@@ -164,16 +166,16 @@ try:
         for start, end in vad._runs(level < level.max() - 25)
         if start > 0 and end < len(level)
     ]
-    check("TRIM_PAD_SEC=0 이어도 발화 사이에 침묵이 남는다",
-          bool(inner) and max(inner) >= 0.09, f"{max(inner or [0]):.2f}초")
+    check("silence remains between utterances even at TRIM_PAD_SEC=0",
+          bool(inner) and max(inner) >= 0.09, f"{max(inner or [0]):.2f}s")
 finally:
     config.TRIM_PAD_SEC = original_pad
 
 
-# ── 저역 웅웅거림에도 무음 판정이 되는가 ──────────────────────────────
-# 에어컨·팬은 100Hz 아래에 몰려 있다. 안 걷으면 잡음 바닥이 통째로 올라가
-# "세기 차이가 12dB 미만" 에 걸려 아예 자르지 못한다.
-print("\n── 저역 웅웅거림 ──")
+# ── Does silence detection survive low-frequency rumble? ──────────────
+# Air conditioning and fans sit below 100Hz. Leave them in and the noise floor
+# rises until the "less than 12dB range" guard blocks all cutting.
+print("\n── Low-frequency rumble ──")
 moment = np.arange(len(audio)) / SR
 hum = (0.035 * np.sin(2 * np.pi * 45 * moment)
        + 0.02 * np.sin(2 * np.pi * 90 * moment)).astype(np.float32)
@@ -185,27 +187,27 @@ try:
 finally:
     config.TRIM_HIGHPASS_HZ = original_hz
 with_filter = vad.plan(rumbling)[0]
-print(f"       고역통과 없음: {without.stats()['removed']:.1f}초 제거 / "
-      f"{config.TRIM_HIGHPASS_HZ:.0f}Hz 적용: {with_filter.stats()['removed']:.1f}초 제거")
+print(f"       no highpass: {without.stats()['removed']:.1f}s removed / "
+      f"{config.TRIM_HIGHPASS_HZ:.0f}Hz applied: {with_filter.stats()['removed']:.1f}s removed")
 
-check("웅웅거림이 깔리면 고역통과 없이는 무음을 못 자른다", not without.trimmed,
-      f"{without.stats()['removed']:.1f}초")
-check("고역통과를 걸면 정상적으로 잘라낸다", with_filter.trimmed,
-      f"{with_filter.stats()['removed']:.1f}초")
-check("깨끗한 녹음의 결과는 고역통과와 무관하게 같다",
+check("with rumble present, nothing is cut without the highpass", not without.trimmed,
+      f"{without.stats()['removed']:.1f}s")
+check("the highpass restores normal cutting", with_filter.trimmed,
+      f"{with_filter.stats()['removed']:.1f}s")
+check("a clean recording is unaffected by the highpass",
       abs(with_filter.stats()["removed"] - stats["removed"]) < 1.5,
       f"{with_filter.stats()['removed']:.1f} vs {stats['removed']:.1f}")
-check("고역통과가 캐시 키에 들어 있다", "highpass" in vad.params())
+check("the highpass is part of the cache key", "highpass" in vad.params())
 
-# ── ffmpeg 필터 묶음 ──────────────────────────────────────────────────
-print("\n── ffmpeg 필터 묶음 ──")
+# ── ffmpeg filter chains ──────────────────────────────────────────────
+print("\n── ffmpeg filter chains ──")
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
 
-check("off 는 빈 문자열", audio_io.filter_chain("off") == "")
-check("알 수 없는 이름은 그대로 필터로 넘긴다",
+check("'off' is an empty string", audio_io.filter_chain("off") == "")
+check("unknown names pass through as a filter string",
       audio_io.filter_chain("highpass=f=200") == "highpass=f=200")
-check("대소문자 무시", audio_io.filter_chain("VOICE") == audio_io.FILTERS["voice"])
+check("case-insensitive", audio_io.filter_chain("VOICE") == audio_io.FILTERS["voice"])
 
 if shutil.which("ffmpeg"):
     for preset, chain in audio_io.FILTERS.items():
@@ -217,45 +219,46 @@ if shutil.which("ffmpeg"):
              "-af", chain, "-f", "null", "-"],
             capture_output=True, text=True,
         )
-        check(f"'{preset}' 필터가 ffmpeg 에서 실제로 돈다", done.returncode == 0,
+        check(f"the '{preset}' filter actually runs in ffmpeg", done.returncode == 0,
               done.stderr.strip().splitlines()[-1] if done.returncode else chain)
 else:
-    print("       ffmpeg 가 없어 필터 실행 검증은 건너뜀")
+    print("       ffmpeg not installed — skipping the filter execution check")
 
-# ── 조각 나누기 ───────────────────────────────────────────────────────
-print("\n── 조각 나누기 ──")
-pieces = vad.chunks(timeline, 20.0)   # 57.5초를 20초씩
-print("조각:", [(round(p.span[0] / SR, 2), round(p.span[1] / SR, 2)) for p in pieces])
+# ── Chunking ──────────────────────────────────────────────────────────
+print("\n── Chunking ──")
+pieces = vad.chunks(timeline, 20.0)   # 57.5s in 20s pieces
+print("chunks:", [(round(p.span[0] / SR, 2), round(p.span[1] / SR, 2)) for p in pieces])
 
-check("조각이 여러 개로 나뉜다", len(pieces) > 1, f"{len(pieces)}개")
-check("조각 순서가 오름차순이고 겹치지 않는다",
+check("the file splits into several chunks", len(pieces) > 1, f"{len(pieces)}")
+check("chunks are ordered and never overlap",
       all(a.span[1] <= b.span[0] for a, b in zip(pieces, pieces[1:])))
-check("조각을 모두 합치면 원래 남긴 구간 전부",
+check("all chunks together cover exactly the kept regions",
       [r for p in pieces for r in p.regions] == timeline.regions)
-check("조각을 이어 붙이면 통째로 자른 것과 같다",
+check("concatenated chunks equal trimming in one pass",
       np.array_equal(np.concatenate([p.apply(audio) for p in pieces]), timeline.apply(audio)))
 
-# 조각 범위만 파일에서 읽어 자르는 경로 (10시간을 통째로 안 올리기 위한 것)
+# The path that reads only a chunk's range (so 10 hours never loads at once)
 windowed = [p.apply(audio[p.span[0]:p.span[1]], p.span[0]) for p in pieces]
-check("조각 범위만 읽어 잘라도 결과가 같다",
+check("reading only a chunk's range gives the same result",
       all(np.array_equal(a, p.apply(audio)) for a, p in zip(windowed, pieces)))
 
-# 조각 안에서 나온 시각이 곧바로 원본 시각인가
+# Is a time from inside a chunk already an original-clock time?
 for order, piece in enumerate(pieces):
     length = piece.kept / SR
     lo, hi = piece.to_original(0.0), piece.to_original(length)
     inside = piece.span[0] / SR <= lo and hi <= piece.span[1] / SR
-    check(f"{order + 1}번 조각의 시각이 제 범위 안으로 돌아온다", inside,
-          f"{lo:.2f}~{hi:.2f} (범위 {piece.span[0]/SR:.2f}~{piece.span[1]/SR:.2f})")
+    check(f"chunk {order + 1} maps back inside its own range", inside,
+          f"{lo:.2f}-{hi:.2f} (range {piece.span[0]/SR:.2f}-{piece.span[1]/SR:.2f})")
 
-check("경계가 침묵 안에 있다 (말 도중에 자르지 않는다)",
+check("boundaries land in silence (never mid-speech)",
       all(any(abs(p.span[0] - s) < 2 for s, _ in timeline.regions) for p in pieces[1:]))
-check("나눌 필요가 없으면 그대로 한 개", len(vad.chunks(timeline, 3600.0)) == 1)
-check("CHUNK_SEC=0 이면 나누지 않는다", len(vad.chunks(timeline, 0.0)) == 1)
+check("no split needed means exactly one chunk", len(vad.chunks(timeline, 3600.0)) == 1)
+check("CHUNK_SEC=0 disables chunking", len(vad.chunks(timeline, 0.0)) == 1)
 
-# ── wav 를 구간 단위로 읽기 ───────────────────────────────────────────
-# 조각 처리의 전제. 여기가 어긋나면 조각마다 엉뚱한 오디오를 인식한다.
-print("\n── wav 구간 읽기 ──")
+# ── Reading a wav by range ────────────────────────────────────────────
+# The premise of chunking. Get this wrong and every chunk transcribes the
+# wrong audio.
+print("\n── Ranged wav reads ──")
 import io  # noqa: E402
 import tempfile  # noqa: E402
 import wave as wave_mod  # noqa: E402
@@ -271,31 +274,31 @@ with tempfile.TemporaryDirectory() as folder:
         handle.writeframes(stored.tobytes())
 
     whole = audio_io.read_wav(sample_path)
-    check("전체 읽기 길이가 맞다", len(whole) == len(audio), f"{len(whole)} vs {len(audio)}")
-    check("샘플 수를 따로도 읽을 수 있다", audio_io.sample_count(sample_path) == len(audio))
-    # 파일에 든 정수를 그대로 /32768 한 값이어야 한다 (whisperx.load_audio 와 같은 규약)
-    check("디코딩이 정확하다", np.array_equal(whole, stored.astype(np.float32) / 32768.0))
+    check("full read returns the right length", len(whole) == len(audio), f"{len(whole)} vs {len(audio)}")
+    check("sample count can be read separately", audio_io.sample_count(sample_path) == len(audio))
+    # Must equal the stored integers / 32768 (same convention as whisperx.load_audio)
+    check("decoding is exact", np.array_equal(whole, stored.astype(np.float32) / 32768.0))
 
     lo, hi = 7 * SR, 21 * SR
-    check("구간만 읽어도 전체에서 자른 것과 같다",
+    check("a ranged read equals slicing the full read",
           np.array_equal(audio_io.read_wav(sample_path, lo, hi), whole[lo:hi]))
-    check("끝을 넘겨 요청하면 파일 끝까지",
+    check("reading past the end stops at the end",
           len(audio_io.read_wav(sample_path, len(audio) - SR, len(audio) + 99 * SR)) == SR)
-    check("범위 밖이면 빈 배열", len(audio_io.read_wav(sample_path, len(audio) + 5, None)) == 0)
+    check("out of range returns an empty array", len(audio_io.read_wav(sample_path, len(audio) + 5, None)) == 0)
 
-    # 전사록 한 줄을 눌렀을 때 내려보낼 조각
+    # The clip served when a transcript line is clicked
     clip = audio_io.clip_wav(sample_path, 15.0, 19.0)
     with wave_mod.open(io.BytesIO(clip), "rb") as handle:
-        check("조각 wav 가 정상적인 wav 파일이다",
+        check("the clip is a valid wav file",
               handle.getframerate() == SR and handle.getnchannels() == 1)
-        check("조각 길이가 요청한 만큼", abs(handle.getnframes() / SR - 4.0) < 0.01,
-              f"{handle.getnframes() / SR:.2f}초")
+        check("clip length matches the request", abs(handle.getnframes() / SR - 4.0) < 0.01,
+              f"{handle.getnframes() / SR:.2f}s")
         cut = np.frombuffer(handle.readframes(handle.getnframes()), dtype="<i2")
-    check("조각 내용이 원본의 그 구간과 같다",
+    check("clip content matches that range of the original",
           np.array_equal(cut, stored[15 * SR:19 * SR]))
-    check("조각은 상한을 넘지 않는다",
+    check("clips respect the max length",
           len(audio_io.clip_wav(sample_path, 0.0, 9999.0, max_sec=2.0)) <= 2 * SR * 2 + 100)
-    check("거꾸로 된 범위도 죽지 않는다", audio_io.clip_wav(sample_path, 20.0, 5.0) is not None)
+    check("a reversed range does not crash", audio_io.clip_wav(sample_path, 20.0, 5.0) is not None)
 
     bad_path = Path(folder) / "bad.wav"
     with wave_mod.open(str(bad_path), "wb") as handle:
@@ -305,38 +308,39 @@ with tempfile.TemporaryDirectory() as folder:
         handle.writeframes(b"\x00\x00" * 1000)
     try:
         audio_io.read_wav(bad_path)
-        check("44.1kHz wav 는 거부한다", False, "예외가 안 났다")
+        check("44.1kHz wav is rejected", False, "no exception was raised")
     except RuntimeError as exc:
-        check("44.1kHz wav 는 거부한다", "44100" in str(exc), str(exc)[:60])
+        check("44.1kHz wav is rejected", "44100" in str(exc), str(exc)[:60])
 
-# ── 조각 간 화자 이어붙이기 ───────────────────────────────────────────
-print("\n── 조각 간 화자 이어붙이기 ──")
+# ── Cross-chunk speaker stitching ─────────────────────────────────────
+print("\n── Cross-chunk speaker stitching ──")
 from app import db, stitch  # noqa: E402
 
 people = [db.normalize(rng.normal(0, 1, 192)) for _ in range(3)]
 
 
 def voice(person: int, drift: float = 0.04):
-    """같은 사람의 다른 조각 임베딩 — 조금 흔들리게.
+    """The same person's embedding in a different chunk — slightly perturbed.
 
-    정규화된 192차원 벡터라 성분 하나의 크기는 1/sqrt(192)≈0.072 다. drift 를
-    그보다 크게 주면 잡음이 신호를 덮어 같은 사람이 아니게 된다. 0.04 는
-    코사인 0.87 근처 — 같은 녹음의 다른 조각에서 실제로 나오는 정도.
+    These are normalized 192-dim vectors, so one component is about
+    1/sqrt(192) ~= 0.072. Drift larger than that drowns the signal in noise and
+    it stops being the same person. 0.04 lands near cosine 0.87, which is what
+    different chunks of one recording actually look like.
     """
     return db.normalize(people[person] + rng.normal(0, drift, 192))
 
 
 same = float(voice(0) @ voice(0))
 other = float(voice(0) @ voice(1))
-print(f"       같은 사람 코사인 {same:.2f} / 다른 사람 {other:.2f} "
-      f"(임계값 {config.STITCH_THRESHOLD:.2f})")
-check("합성 데이터가 임계값 양쪽으로 갈린다",
+print(f"       same person cosine {same:.2f} / different person {other:.2f} "
+      f"(threshold {config.STITCH_THRESHOLD:.2f})")
+check("synthetic data lands on both sides of the threshold",
       other < config.STITCH_THRESHOLD <= same, f"{other:.2f} / {same:.2f}")
 
 
-# 조각1: 사람0=SPEAKER_00, 사람1=SPEAKER_01
-# 조각2: 사람1=SPEAKER_00, 사람0=SPEAKER_01   ← 라벨이 뒤바뀐 상황
-# 조각3: 사람2 만 등장 (새 사람)
+# chunk 1: person0=SPEAKER_00, person1=SPEAKER_01
+# chunk 2: person1=SPEAKER_00, person0=SPEAKER_01   <- labels swapped
+# chunk 3: only person2 appears (a new person)
 parts = [
     ([{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
       {"start": 5.0, "end": 9.0, "speaker": "SPEAKER_01"}],
@@ -354,73 +358,74 @@ merged_turns, merged_emb, merged_speech, merged_overlaps, notes = stitch.merge(p
 for note in notes:
     print(f"       {note}")
 
-check("사람 수를 정확히 셌다", len(merged_speech) == 3, f"{len(merged_speech)}명")
-check("라벨이 뒤바뀐 조각을 바로잡았다",
+check("speaker count is right", len(merged_speech) == 3, f"{len(merged_speech)}")
+check("a chunk with swapped labels gets corrected",
       merged_turns[0]["speaker"] == merged_turns[3]["speaker"],
       f"{merged_turns[0]['speaker']} vs {merged_turns[3]['speaker']}")
-check("다른 사람을 합치지 않았다",
+check("different people are not merged",
       merged_turns[0]["speaker"] != merged_turns[1]["speaker"])
-check("총 발화 시간이 합산된다",
-      abs(sum(merged_speech.values()) - 26.0) < 1e-9, f"{sum(merged_speech.values())}초")
-check("발화 시간이 사람별로 옳게 모였다",
+check("speech time is summed",
+      abs(sum(merged_speech.values()) - 26.0) < 1e-9, f"{sum(merged_speech.values())}s")
+check("speech time groups correctly per person",
       sorted(round(v, 1) for v in merged_speech.values()) == [8.0, 8.0, 10.0],
       str(sorted(round(v, 1) for v in merged_speech.values())))
-check("turn 이 시각 순으로 정렬된다",
+check("turns come out sorted by time",
       all(a["start"] <= b["start"] for a, b in zip(merged_turns, merged_turns[1:])))
-check("합친 임베딩이 정규화되어 있다",
+check("merged embeddings are normalized",
       all(abs(float(np.linalg.norm(v)) - 1.0) < 1e-5 for v in merged_emb.values()))
 
 single = stitch.merge([parts[0]])
-check("조각이 하나면 라벨을 그대로 둔다",
+check("a single chunk keeps its labels",
       [t["speaker"] for t in single[0]] == ["SPEAKER_00", "SPEAKER_01"], str(single[0]))
 
-# pyannote 는 겹침만 있는 화자의 임베딩을 NaN 으로 내놓고 diarize 가 버린다.
-# 그러면 "발화 시간은 있는데 목소리는 모르는" 라벨이 생긴다. 이게 조각 목록에
-# 섞인 채 다음 조각과 대조하다가 터졌었다 (max() on empty).
+# pyannote returns NaN for speakers that only appear in overlap, and diarize
+# discards those — leaving a label with speech time but no known voice. One of
+# those sitting in the speaker list used to crash the next comparison
+# (max() on an empty sequence).
 voiceless = [
     ([{"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00"}],
-     {},                                   # 임베딩이 하나도 없는 조각
+     {},                                   # a chunk with no embeddings at all
      {"SPEAKER_00": 4.0}),
     ([{"start": 10.0, "end": 15.0, "speaker": "SPEAKER_00"},
       {"start": 15.0, "end": 18.0, "speaker": "SPEAKER_01"}],
-     {"SPEAKER_00": voice(0)},             # 한쪽만 임베딩이 있는 조각
+     {"SPEAKER_00": voice(0)},             # a chunk where only one has an embedding
      {"SPEAKER_00": 5.0, "SPEAKER_01": 3.0}),
     ([{"start": 20.0, "end": 26.0, "speaker": "SPEAKER_00"}],
-     {"SPEAKER_00": voice(0)},             # 위와 같은 사람
+     {"SPEAKER_00": voice(0)},             # the same person as above
      {"SPEAKER_00": 6.0}),
 ]
 try:
     v_turns, v_emb, v_speech, _, _ = stitch.merge(voiceless)
-    check("임베딩 없는 화자가 섞여도 죽지 않는다", True)
-    # 목소리 모르는 둘은 각각 따로 남고(4.0, 3.0), voice(0) 둘만 합쳐진다(5+6=11)
-    check("임베딩 없는 화자는 아무와도 합쳐지지 않는다",
+    check("a voiceless speaker in the mix does not crash it", True)
+    # The two voiceless ones stay separate (4.0, 3.0); only the voice(0) pair merges (5+6=11)
+    check("voiceless speakers merge with nobody",
           sorted(round(v, 1) for v in v_speech.values()) == [3.0, 4.0, 11.0],
-          f"{len(v_speech)}명 {sorted(round(v, 1) for v in v_speech.values())}")
-    check("임베딩 있는 같은 사람은 조각을 넘어 합쳐진다",
+          f"{len(v_speech)} speakers {sorted(round(v, 1) for v in v_speech.values())}")
+    check("the same person with a voice merges across chunks",
           v_turns[1]["speaker"] == v_turns[3]["speaker"],
           f"{v_turns[1]['speaker']} vs {v_turns[3]['speaker']}")
-    check("임베딩 없는 화자는 결과 임베딩에서 빠진다", len(v_emb) == 1, str(sorted(v_emb)))
-    check("발화 시간은 전부 보존된다", abs(sum(v_speech.values()) - 18.0) < 1e-9,
-          f"{sum(v_speech.values())}초")
+    check("voiceless speakers are absent from the result embeddings", len(v_emb) == 1, str(sorted(v_emb)))
+    check("all speech time is preserved", abs(sum(v_speech.values()) - 18.0) < 1e-9,
+          f"{sum(v_speech.values())}s")
 except ValueError as exc:
-    check("임베딩 없는 화자가 섞여도 죽지 않는다", False, str(exc))
+    check("a voiceless speaker in the mix does not crash it", False, str(exc))
 
-# turn 에만 나오는 라벨도 반드시 새 이름을 받아야 한다.
-# 원래 라벨을 그대로 두면 다른 사람이 조용히 한 명으로 합쳐진다.
+# A label that only appears in turns must still get a new name.
+# Leaving the original label quietly fuses two different people into one.
 stray = stitch.merge([
     ([{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"}],
      {"SPEAKER_00": voice(0)}, {"SPEAKER_00": 5.0}),
-    ([{"start": 9.0, "end": 12.0, "speaker": "SPEAKER_00"}],   # speech_sec 에 없는 라벨
+    ([{"start": 9.0, "end": 12.0, "speaker": "SPEAKER_00"}],   # label missing from speech_sec
      {}, {}),
 ])
-check("turn 에만 있는 라벨도 딴 사람으로 분리된다",
+check("a label only seen in turns stays a separate person",
       stray[0][0]["speaker"] != stray[0][1]["speaker"],
       f"{stray[0][0]['speaker']} vs {stray[0][1]['speaker']}")
 
-# ── 과분할된 화자 다시 묶기 ───────────────────────────────────────────
-print("\n── 과분할된 화자 다시 묶기 ──")
+# ── Re-merging over-split speakers ────────────────────────────────────
+print("\n── Re-merging over-split speakers ──")
 
-# pyannote 가 사람0 을 SPEAKER_00/SPEAKER_02 둘로 쪼갠 상황. 사람1 은 딴 사람.
+# pyannote split person0 into SPEAKER_00 and SPEAKER_02. person1 is someone else.
 split_turns = [
     {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
     {"start": 5.0, "end": 9.0, "speaker": "SPEAKER_01"},
@@ -434,62 +439,62 @@ c_turns, c_emb, c_speech, c_notes = stitch.collapse(
 )
 for note in c_notes:
     print(f"       {note}")
-check("쪼개진 같은 사람을 다시 묶는다", len(c_speech) == 2, f"{len(c_speech)}명")
-check("합쳐진 쪽 turn 이 같은 라벨이 된다",
+check("an over-split person is merged back", len(c_speech) == 2, f"{len(c_speech)}")
+check("merged turns share one label",
       c_turns[0]["speaker"] == c_turns[2]["speaker"],
       f"{c_turns[0]['speaker']} vs {c_turns[2]['speaker']}")
-check("딴 사람은 그대로 둔다", c_turns[1]["speaker"] != c_turns[0]["speaker"])
-check("발화 시간이 합산된다", abs(max(c_speech.values()) - 10.0) < 1e-9, str(c_speech))
-check("합계는 보존된다", abs(sum(c_speech.values()) - 14.0) < 1e-9, str(sum(c_speech.values())))
+check("the other person is left alone", c_turns[1]["speaker"] != c_turns[0]["speaker"])
+check("speech time is summed", abs(max(c_speech.values()) - 10.0) < 1e-9, str(c_speech))
+check("the total is preserved", abs(sum(c_speech.values()) - 14.0) < 1e-9, str(sum(c_speech.values())))
 
-# 동시에 말한 적이 있으면 아무리 닮아도 묶지 않는다 — 같은 사람일 수 없다
+# Talking at the same time blocks the merge no matter how similar — they cannot be one person
 o_turns, o_emb, o_speech, o_notes = stitch.collapse(
     split_turns, split_emb, dict(split_speech), [["SPEAKER_00", "SPEAKER_02"]]
 )
-check("동시에 말한 쌍은 닮아도 안 묶는다", len(o_speech) == 3 and not o_notes,
-      f"{len(o_speech)}명")
+check("a pair who talked at once is never merged, however similar", len(o_speech) == 3 and not o_notes,
+      f"{len(o_speech)}")
 
-# 반증은 합쳐질 때 옮겨 받아야 한다 (A~B 를 묶으면 B 와 겹친 C 는 A 와도 다른 사람)
+# Disproofs must be inherited on merge (merge A and B, and whoever overlapped B is also not A)
 chain_turns = [{"start": float(i), "end": i + 1.0, "speaker": f"SPEAKER_0{i}"} for i in range(3)]
 chain = stitch.collapse(
     chain_turns,
     {"SPEAKER_00": voice(0), "SPEAKER_01": voice(0), "SPEAKER_02": voice(0)},
     {"SPEAKER_00": 5.0, "SPEAKER_01": 5.0, "SPEAKER_02": 5.0},
-    [["SPEAKER_01", "SPEAKER_02"]],   # 01 과 02 는 동시에 말했다
+    [["SPEAKER_01", "SPEAKER_02"]],   # 01 and 02 talked at the same time
 )
-check("반증이 합병을 따라 옮겨간다", len(chain[2]) == 2, f"{len(chain[2])}명 {chain[2]}")
+check("disproofs are inherited through a merge", len(chain[2]) == 2, f"{len(chain[2])} speakers {chain[2]}")
 
 original_merge, config.MERGE_THRESHOLD = config.MERGE_THRESHOLD, 0.0
 try:
     off = stitch.collapse(split_turns, split_emb, dict(split_speech), [])
-    check("MERGE_THRESHOLD=0 이면 아무것도 안 묶는다", len(off[2]) == 3 and not off[3])
+    check("MERGE_THRESHOLD=0 merges nothing", len(off[2]) == 3 and not off[3])
 finally:
     config.MERGE_THRESHOLD = original_merge
 
-# 목소리를 모르는 화자는 묶을 근거가 없으니 그대로 남는다
+# With no voice there is no basis for merging, so they stay as they are
 q_turns, q_emb, q_speech, _ = stitch.collapse(
     split_turns + [{"start": 20.0, "end": 23.0, "speaker": "SPEAKER_09"}],
     split_emb, {**split_speech, "SPEAKER_09": 3.0}, [],
 )
-check("목소리 모르는 화자는 건드리지 않는다", "SPEAKER_09" in q_speech, str(sorted(q_speech)))
+check("speakers with no voice are left untouched", "SPEAKER_09" in q_speech, str(sorted(q_speech)))
 
-# 같은 이름을 붙이면 한 줄로 합쳐지는가 (사용자가 직접 고치는 경로)
+# Does giving the same name join the lines? (the manual fix path)
 from app import render  # noqa: E402
 
 lines = render.merge_lines(
-    [{"speaker": "SPEAKER_00", "text": "앞부분", "start": 0.0, "end": 1.0},
-     {"speaker": "SPEAKER_02", "text": "뒷부분", "start": 1.0, "end": 2.0}],
-    {"SPEAKER_00": "안차돌", "SPEAKER_02": "안차돌"},
+    [{"speaker": "SPEAKER_00", "text": "first half", "start": 0.0, "end": 1.0},
+     {"speaker": "SPEAKER_02", "text": "second half", "start": 1.0, "end": 2.0}],
+    {"SPEAKER_00": "Alex Kim", "SPEAKER_02": "Alex Kim"},
 )
-check("같은 이름을 준 화자는 한 줄로 합쳐진다",
-      len(lines) == 1 and lines[0]["text"] == "앞부분 뒷부분", str(lines))
+check("speakers given the same name join into one line",
+      len(lines) == 1 and lines[0]["text"] == "first half second half", str(lines))
 
-# ── 환각 필터 ─────────────────────────────────────────────────────────
-print("\n── 환각 필터 ──")
+# ── Hallucination filter ──────────────────────────────────────────────
+print("\n── Hallucination filter ──")
 from app import cleanup  # noqa: E402
 
 def seg(text, start=0.0, end=5.0, score=None):
-    """정렬 점수가 있는/없는 세그먼트. score=None 이면 점수 정보가 없는 상황."""
+    """A segment with or without an alignment score. score=None means no score info."""
     words = [] if score is None else [{"word": text, "start": start, "end": end, "score": score}]
     return {"text": text, "start": start, "end": end, "words": words}
 
@@ -499,68 +504,70 @@ def verdict(item):
     return (result[0] if result else "keep"), (result[1] if result else "")
 
 
-# 내용 없는 반복 — 글자만 보고 지운다 (진짜여도 잃을 게 없다)
+# Contentless repetition — deleted on the text alone (nothing lost even if real)
+# The Korean strings below are deliberate: they exercise the Korean patterns in
+# cleanup.BOILERPLATE, which have to stay Korean to match Korean transcripts.
 for text in ["아 아 아 아 아 아 아 아", "아아아아아아아", "네 네 네 네 네 네 네"]:
     action, why = verdict(seg(text))
-    check(f"반복은 바로 버린다: {text[:20]}", action == "drop", why)
+    check(f"repetition is dropped outright: {text[:20]}", action == "drop", why)
 
-# 상투구 — 소리가 글자와 맞으면(점수 높음) 지우지 않는다
+# Boilerplate — not deleted when the audio matches the words (high score)
 for text in ["MBC 뉴스 김성현이었습니다", "시청해주셔서 감사합니다",
              "구독과 좋아요 부탁드립니다", "Thanks for watching!"]:
     action, why = verdict(seg(text, score=0.9))
-    check(f"상투구인데 소리가 맞으면 남긴다: {text[:22]}", action == "suspect", why)
+    check(f"boilerplate is kept when the audio matches: {text[:22]}", action == "suspect", why)
     action, why = verdict(seg(text, score=0.05))
-    check(f"상투구 + 낮은 점수면 버린다: {text[:22]}", action == "drop", why)
+    check(f"boilerplate + low score is dropped: {text[:22]}", action == "drop", why)
 
-# 침묵 30초를 한 문장으로 때우는 전형적 환각 — 점수 정보가 없어도 잡힌다
+# The classic hallucination: one sentence over 30s of silence — caught without any score
 action, why = verdict(seg("시청해주셔서 감사합니다", 0.0, 30.0))
-check("30초를 한 문장으로 때우면 점수 없이도 버린다", action == "drop", why)
+check("one sentence over 30s is dropped even with no score", action == "drop", why)
 
-# 진짜 발언은 건드리지 않는다
+# Real speech is left alone
 for text in ["감사합니다", "네 이거 좋아요", "다음 시간에 뵙겠습니다",
              "알림 설정 좀 바꿔주세요", "그래서 제가 어제 말씀드린 대로 진행하겠습니다",
              "아 그건 제가 확인해 보겠습니다", "네 네 네 알겠습니다 그러면 그렇게 진행할게요",
              "MBC 뉴스에서 그 얘기 나왔던 거 기억나세요", "구독자 수가 지난달보다 늘었어요"]:
     action, why = verdict(seg(text, score=0.85))
-    check(f"진짜 발언은 남긴다: {text[:24]}", action == "keep", why)
+    check(f"real speech is kept: {text[:24]}", action == "keep", why)
 
-# 뉴스 녹음을 전사하는 경우 — 앵커 클로징은 진짜 발언이다
+# When transcribing the news, an anchor's sign-off is a real utterance
 action, why = verdict(seg("MBC 뉴스 김성현이었습니다", 0.0, 2.4, score=0.88))
-check("뉴스 전사에서 앵커 클로징은 지우지 않는다", action == "suspect", why)
+check("a news sign-off is not deleted when transcribing news", action == "suspect", why)
 
 kept_segs, dropped_segs, suspect_segs = cleanup.clean([
-    seg("아 아 아 아 아 아 아 아"),                    # drop
-    seg("시청해주셔서 감사합니다", score=0.02),          # drop
-    seg("MBC 뉴스 김성현이었습니다", score=0.9),        # suspect (남김)
-    seg("그래서 어제 말씀드린 대로 진행하겠습니다", score=0.9),  # keep
+    seg("uh uh uh uh uh uh uh uh"),                    # drop
+    seg("시청해주셔서 감사합니다", score=0.02),          # drop (Korean boilerplate)
+    seg("MBC 뉴스 김성현이었습니다", score=0.9),        # suspect (kept)
+    seg("We'll proceed as I explained yesterday", score=0.9),  # keep
 ])
-check("clean() 이 세 갈래로 나눈다",
+check("clean() splits into three buckets",
       (len(kept_segs), len(dropped_segs), len(suspect_segs)) == (2, 2, 1),
-      f"남김 {len(kept_segs)} / 버림 {len(dropped_segs)} / 의심 {len(suspect_segs)}")
-check("의심 구간은 결과에 그대로 남는다",
+      f"kept {len(kept_segs)} / dropped {len(dropped_segs)} / suspect {len(suspect_segs)}")
+check("suspect segments stay in the output",
       any("MBC" in (s["text"] or "") for s in kept_segs))
-check("버린 것과 의심에 이유가 붙는다",
+check("dropped and suspect entries carry a reason",
       all(item["reason"] for item in dropped_segs + suspect_segs))
-check("경고 문구가 지운 것과 남긴 것을 둘 다 알린다",
+check("the warning mentions both what was dropped and what was kept",
       len(cleanup.summary(dropped_segs, suspect_segs)) == 2)
 
 original_suspect, config.DROP_SUSPECT = config.DROP_SUSPECT, True
 try:
     _, hard_dropped, hard_suspect = cleanup.clean([seg("MBC 뉴스 김성현이었습니다", score=0.9)])
-    check("DROP_SUSPECT=true 면 의심 구간도 버린다",
+    check("DROP_SUSPECT=true drops suspect segments too",
           len(hard_dropped) == 1 and not hard_suspect)
 finally:
     config.DROP_SUSPECT = original_suspect
 
 original_drop, config.DROP_HALLUCINATION = config.DROP_HALLUCINATION, False
 try:
-    check("DROP_HALLUCINATION=false 면 아무것도 안 버린다",
+    check("DROP_HALLUCINATION=false drops nothing",
           cleanup.clean([seg("아 아 아 아 아 아 아")])[1] == [])
 finally:
     config.DROP_HALLUCINATION = original_drop
 
 print()
 if failures:
-    print(f"실패 {len(failures)}건: {', '.join(failures)}")
+    print(f"{len(failures)} failure(s): {', '.join(failures)}")
     raise SystemExit(1)
-print("전부 통과.")
+print("All checks passed.")

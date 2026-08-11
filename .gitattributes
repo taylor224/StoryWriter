@@ -1,4 +1,4 @@
-# 배치 파일은 CRLF 여야 cmd.exe 가 안정적으로 동작한다
+# Batch files need CRLF for cmd.exe to behave reliably
 * text=auto eol=lf
 *.bat text eol=crlf
 *.cmd text eol=crlf

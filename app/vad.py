@@ -1,16 +1,17 @@
-"""전사 전에 무음을 들어내고, 끝나면 타임스탬프를 원본 시각으로 되돌린다.
+"""Cut silence out before transcription, then put the timestamps back.
 
-Whisper 는 긴 침묵 구간에서 하지도 않은 말을 지어내는 버릇이 있고, 침묵을
-통과시키는 계산도 그대로 비용이다. 전사 전에 무음을 잘라내면 둘 다 줄어든다.
+Whisper likes to invent words during long silences, and pushing silence through
+the models costs the same as pushing speech. Trimming it first reduces both.
 
-문제는 잘라낸 만큼 뒤쪽 시각이 앞으로 당겨진다는 것이다. 그래서 잘라낸 파형과
-함께 Timeline 을 만들어 두고, 전사·정렬이 끝나면 모든 타임스탬프를 원본 시각으로
-되돌린다. 화자 분리는 원본 wav 를 그대로 쓰므로 그 뒤 단계는 잘린 적이 있다는
-사실을 몰라도 된다.
+The catch is that everything after a cut slides earlier by however much was
+removed. So we build a Timeline alongside the trimmed waveform and, once
+transcription and alignment are done, map every timestamp back to the original
+clock. Diarization uses the untouched wav, so nothing downstream needs to know
+a cut ever happened.
 
-무음 판정은 프레임 RMS 기준의 에너지 방식이다. 별도 모델을 받지 않고, 파일마다
-잡음 바닥이 다르므로 절대 dB 가 아니라 그 파일의 잡음 바닥과 발화 세기 사이에서
-기준선을 잡는다.
+Silence detection is plain frame-RMS energy. No extra model to download, and
+since the noise floor differs per file we place the threshold between that
+file's own noise floor and its speech level rather than at an absolute dB.
 """
 
 import bisect
@@ -20,19 +21,19 @@ import numpy as np
 from . import audio, config
 
 SAMPLE_RATE = audio.SAMPLE_RATE
-FRAME_SEC = 0.02  # 20ms — 자음 하나가 묻히지 않을 만큼 짧고 잡음에 덜 흔들린다
+FRAME_SEC = 0.02  # 20ms — short enough not to swallow a consonant, long enough to be steady
 EPS = 1e-10
 
 
 class Timeline:
-    """잘라낸 파형의 시각을 원본 파형의 시각으로 되돌리는 표.
+    """Maps a time on the trimmed waveform back to a time on the original.
 
-    regions 는 원본에서 "남긴" 구간 [start, end) 의 샘플 인덱스 목록이다.
-    잘라낸 파형은 이 구간들을 순서대로 이어 붙인 것이므로, 잘린 쪽 시각 t 는
-    항상 정확히 한 구간 안에 떨어진다 (빈틈이 생기지 않는다).
+    regions holds the [start, end) sample ranges that were *kept* from the
+    original. The trimmed waveform is those ranges concatenated in order, so any
+    trimmed-clock time t falls inside exactly one region — there are no gaps.
 
-    regions 가 비어 있으면 "아무것도 자르지 않음" 이고 모든 변환이 항등이다.
-    호출부가 켜짐/꺼짐을 분기하지 않아도 되게 하려는 것.
+    Empty regions means "nothing was cut" and every transform is the identity.
+    That way callers never have to branch on whether trimming is on.
     """
 
     def __init__(self, regions, total: int, sample_rate: int = SAMPLE_RATE):
@@ -40,7 +41,7 @@ class Timeline:
         self.total = int(total)
         self.sample_rate = int(sample_rate)
 
-        # offsets[i] = 잘라낸 파형에서 i 번째 구간이 시작하는 샘플 위치
+        # offsets[i] = where region i starts on the trimmed waveform
         self.offsets: list[int] = []
         cursor = 0
         for start, end in self.regions:
@@ -50,7 +51,7 @@ class Timeline:
 
     @classmethod
     def identity(cls, total: int, sample_rate: int = SAMPLE_RATE) -> "Timeline":
-        """아무것도 자르지 않은 표. total 은 표시용으로만 쓰인다."""
+        """A table that cuts nothing. total is only used for reporting."""
         return cls([], total, sample_rate)
 
     @property
@@ -59,20 +60,21 @@ class Timeline:
 
     @property
     def span(self) -> tuple[int, int]:
-        """원본에서 이 표가 걸쳐 있는 [start, end) 범위. 조각을 파일에서 읽을 때 쓴다."""
+        """The [start, end) range this table covers in the original. Used to read a chunk."""
         if not self.regions:
             return (0, self.total)
         return (self.regions[0][0], self.regions[-1][1])
 
     def apply(self, samples: np.ndarray, origin: int = 0) -> np.ndarray:
-        """남긴 구간만 이어 붙인 파형.
+        """The kept regions concatenated.
 
-        samples 가 원본 전체가 아니라 origin 샘플부터 잘라 읽은 조각이면 origin
-        을 준다 (10시간짜리를 통째로 올리지 않으려면 이 경로가 필요하다).
+        If samples is not the whole original but a window read from sample
+        `origin` onward, pass origin (needed to avoid loading a 10-hour file
+        into memory all at once).
         """
         if not self.regions:
             return samples
-        # 디코더가 달라 샘플 수가 한두 개 어긋나도 죽지 않게 끝을 잘라 맞춘다
+        # Tolerate a sample or two of drift between decoders instead of dying
         limit = origin + int(samples.shape[0])
         pieces = [
             samples[max(start, origin) - origin : min(end, limit) - origin]
@@ -84,36 +86,37 @@ class Timeline:
         return pieces[0] if len(pieces) == 1 else np.concatenate(pieces)
 
     def to_original(self, seconds: float) -> float:
-        """잘라낸 파형의 시각 -> 원본 파형의 시각. 단조 증가한다."""
+        """Trimmed-clock time -> original-clock time. Monotonically increasing."""
         if not self.trimmed:
             return float(seconds)
         return self._at(seconds * self.sample_rate) / self.sample_rate
 
     def _at(self, position: float) -> float:
-        """잘라낸 쪽 샘플 위치 -> 원본 샘플 위치."""
+        """Trimmed-clock sample position -> original sample position."""
         if position <= 0:
             return float(self.regions[0][0])
         index = bisect.bisect_right(self.offsets, position) - 1
         index = max(0, min(index, len(self.regions) - 1))
         start, end = self.regions[index]
-        # min(..., end) 는 마지막 구간을 넘어선 시각(정렬 오차 등)을 잡아 준다
+        # min(..., end) catches times past the last region (alignment slop, etc.)
         return min(start + (position - self.offsets[index]), float(end))
 
     def split(self, start: float, end: float) -> list[tuple[float, float]]:
-        """잘라낸 쪽 구간 하나를 원본 구간 여러 개로 쪼갠다.
+        """Break one trimmed-clock span into the original spans it covers.
 
-        잘린 자리를 건너뛰는 구간은 원본에서 이어져 있지 않다. 양 끝만 되돌리면
-        없앤 침묵까지 그 구간이 삼켜 버린다 — 화자 구간이라면 말하지도 않은
-        침묵을 그 화자가 차지한다. 그래서 남긴 구간 경계마다 끊어서 돌려준다.
+        A span that crosses a cut is not contiguous in the original. Mapping
+        only its endpoints would make it swallow the silence we removed — for a
+        speaker turn that means the speaker owns silence they never spoke in. So
+        we break it at every kept-region boundary.
 
-        길이의 합은 보존된다. 쪼개도 총 발화 시간은 그대로다.
+        Total length is preserved: splitting never changes total speech time.
         """
         if not self.trimmed:
             return [(float(start), float(end))]
 
         low = max(0.0, start * self.sample_rate)
         high = min(float(self.kept), end * self.sample_rate)
-        if high <= low:  # 길이 0 이거나 범위 밖 — 한 점으로 되돌린다
+        if high <= low:  # zero length or out of range — collapse to a point
             point = self._at(low) / self.sample_rate
             return [(point, point)]
 
@@ -132,7 +135,7 @@ class Timeline:
         return spans
 
     def restore(self, segments: list[dict]) -> list[dict]:
-        """세그먼트와 단어의 타임스탬프를 제자리에서 원본 시각으로 되돌린다."""
+        """Map segment and word timestamps back to the original clock, in place."""
         if not self.trimmed:
             return segments
         for seg in segments:
@@ -153,7 +156,7 @@ class Timeline:
 
 
 def _shift(item: dict, convert) -> None:
-    # 정렬 모델은 숫자·기호처럼 발음을 못 붙인 단어에 start/end 를 비워 둔다
+    # The aligner leaves start/end empty on words it could not pin down (numerals, symbols)
     for key in ("start", "end"):
         value = item.get(key)
         if value is not None:
@@ -161,14 +164,16 @@ def _shift(item: dict, convert) -> None:
 
 
 def chunks(timeline: Timeline, max_span_sec: float) -> list[Timeline]:
-    """긴 녹음을 조각 Timeline 여러 개로 나눈다. 나눌 필요가 없으면 [timeline].
+    """Split a long recording into chunk Timelines. Returns [timeline] if no split is needed.
 
-    각 조각은 원본 좌표를 그대로 들고 있다. 조각을 돌려 나온 타임스탬프는 별도
-    보정 없이 곧바로 원본 시각이다 — 조각 번호를 들고 다니며 더할 필요가 없다.
+    Each chunk carries original coordinates, so timestamps coming out of a chunk
+    are original-clock after one restore — no chunk index to thread around and
+    no offsets to add.
 
-    경계는 되도록 침묵 한가운데에 둔다. 말하는 도중에 자르면 그 단어가 양쪽에서
-    반씩 인식되고, 화자 분리도 경계에서 흔들린다. 무음 제거를 꺼 두면 어디가
-    침묵인지 알 수 없어 균등 분할로 떨어진다.
+    Boundaries land in the middle of silence wherever possible. Cutting mid-word
+    gets that word half-recognized on both sides and makes diarization wobble at
+    the seam. With silence trimming off we do not know where the silence is, so
+    it falls back to even splits.
     """
     limit = int(max_span_sec * timeline.sample_rate)
     if limit <= 0 or timeline.total <= limit:
@@ -178,7 +183,7 @@ def chunks(timeline: Timeline, max_span_sec: float) -> list[Timeline]:
         groups: list[list[tuple[int, int]]] = []
         current: list[tuple[int, int]] = []
         for region in timeline.regions:
-            # 이 구간까지 넣으면 조각이 너무 길어지는가 (조각 시작점 기준)
+            # Would adding this region make the chunk too long (measured from its start)?
             if current and region[1] - current[0][0] > limit:
                 groups.append(current)
                 current = []
@@ -195,7 +200,7 @@ def chunks(timeline: Timeline, max_span_sec: float) -> list[Timeline]:
 
 
 def params() -> dict:
-    """캐시 키에 넣을 설정값. 하나라도 바뀌면 전사를 다시 돌려야 한다."""
+    """Settings that go into the cache key. Change any of them and transcription reruns."""
     return {
         "min_silence": config.TRIM_MIN_SILENCE_SEC,
         "pad": config.TRIM_PAD_SEC,
@@ -206,29 +211,32 @@ def params() -> dict:
     }
 
 
-# ── 무음 판정 ─────────────────────────────────────────────────────────
+# ── Silence detection ─────────────────────────────────────────────────
 def _power_db(block: np.ndarray, frame: int) -> np.ndarray:
-    """(n, frame) 로 접은 파형의 프레임별 RMS 를 dBFS 로.
+    """Per-frame RMS in dBFS for a waveform folded into (n, frame).
 
-    samples**2 는 원본 크기의 임시 배열을 하나 더 만든다. 1시간짜리면 230MB 라
-    einsum 으로 제곱합만 뽑아 그 복사를 피한다.
+    samples**2 would allocate another array the size of the input — 230MB for an
+    hour — so einsum extracts just the sums of squares and skips that copy.
     """
     power = np.einsum("ij,ij->i", block, block) / frame
     return 10.0 * np.log10(power + EPS)
 
 
 def _frame_db(samples: np.ndarray, frame: int, sample_rate: int = 0) -> np.ndarray:
-    """프레임별 RMS 를 dBFS 로. 판정 전에 저주파를 걷어낸다.
+    """Per-frame RMS in dBFS, with low frequencies removed first.
 
-    에어컨·프로젝터 팬·책상 진동은 대부분 100Hz 아래에 몰려 있다. 사람 목소리의
-    기본 주파수는 낮아도 85Hz 부터라 그 아래는 버려도 말이 상하지 않는다.
+    Air conditioning, projector fans and desk vibration sit almost entirely below
+    100Hz. The human voice bottoms out around 85Hz, so discarding what is under
+    that costs no speech.
 
-    안 걷으면 잡음 바닥이 통째로 올라가 무음과 발화의 세기 차가 좁아지고,
-    "차이가 12dB 미만" 에 걸려 아예 자르지 못한다. 조용한 사무실 녹음인데
-    무음 제거가 안 먹는 경우가 대개 이것이다.
+    Leave it in and the noise floor rises across the board, narrowing the gap
+    between silence and speech until it trips the "less than 12dB" guard and
+    nothing gets cut at all. That is usually why trimming does nothing on a
+    quiet office recording.
 
-    걸러낸 파형은 여기서만 쓰고 버린다. 전사·화자 분리에 넘기는 파형은 원본
-    그대로다 — Whisper 는 잡음 섞인 오디오로 학습돼서 손대면 되레 나빠진다.
+    The filtered waveform is used here and thrown away. What goes to
+    transcription and diarization is the untouched original — Whisper was
+    trained on noisy audio and cleaning it up tends to make things worse.
     """
     count = samples.shape[0] // frame
     if count == 0:
@@ -241,7 +249,7 @@ def _frame_db(samples: np.ndarray, frame: int, sample_rate: int = 0) -> np.ndarr
 
     sos = butter(2, config.TRIM_HIGHPASS_HZ / (sample_rate / 2), btype="highpass", output="sos")
     state = sosfilt_zi(sos) * float(samples[0])
-    # 블록으로 흘려 보낸다. 10시간짜리를 한 번에 필터링하면 사본만 2.3GB 다.
+    # Stream it in blocks. Filtering 10 hours in one go would cost 2.3GB just for the copy.
     step = frame * 20_000
     parts = []
     for start in range(0, usable, step):
@@ -252,14 +260,14 @@ def _frame_db(samples: np.ndarray, frame: int, sample_rate: int = 0) -> np.ndarr
 
 
 def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
-    """True 가 이어지는 구간 [start, end) 목록."""
+    """The [start, end) ranges where mask stays True."""
     padded = np.concatenate(([False], mask, [False]))
     edges = np.flatnonzero(padded[1:] != padded[:-1])
     return list(zip(edges[0::2].tolist(), edges[1::2].tolist()))
 
 
 def _merge(regions: list[tuple[int, int]], gap: int) -> list[tuple[int, int]]:
-    """앞 구간 끝과 뒤 구간 시작의 거리가 gap 미만이면 하나로 잇는다."""
+    """Join two regions when the distance between them is less than gap."""
     merged: list[list[int]] = [list(regions[0])]
     for start, end in regions[1:]:
         if start - merged[-1][1] < gap:
@@ -270,29 +278,31 @@ def _merge(regions: list[tuple[int, int]], gap: int) -> list[tuple[int, int]]:
 
 
 def plan(samples: np.ndarray, sample_rate: int = SAMPLE_RATE) -> tuple[Timeline, str | None]:
-    """어디를 남길지 정한다.
+    """Decide what to keep.
 
-    반환: (Timeline, 건너뛴 이유 or None). 자를 근거가 약하면 항등 Timeline 을
-    돌려준다. 애매할 때 원본을 그대로 두는 쪽이 말을 잘라먹는 것보다 낫다.
+    Returns (Timeline, reason it was skipped or None). When the evidence for
+    cutting is weak it returns the identity Timeline — leaving the original
+    alone beats chopping off someone's words.
     """
     total = int(samples.shape[0])
     identity = Timeline.identity(total, sample_rate)
     frame = max(1, int(round(FRAME_SEC * sample_rate)))
-    if total < sample_rate:  # 1초 미만이면 잘라낼 것도 없다
+    if total < sample_rate:  # under a second, nothing to cut
         return identity, None
 
     level = _frame_db(samples, frame, sample_rate)
 
-    # 파일마다 잡음 바닥이 다르다. 절대 dB 로 자르면 조용한 녹음은 통째로
-    # 무음이 되고, 시끄러운 녹음은 아무것도 안 잘린다. 그래서 이 파일 안에서
-    # "조용한 쪽"과 "말하는 쪽"을 먼저 재고 그 사이에 기준선을 놓는다.
+    # Every file has a different noise floor. Cutting at an absolute dB would
+    # turn a quiet recording entirely into "silence" and a loud one into nothing
+    # at all. So measure this file's own quiet side and speaking side first, then
+    # put the line between them.
     floor_db = float(np.percentile(level, 10))
     speech_db = float(np.percentile(level, 95))
     span = speech_db - floor_db
     if span < config.TRIM_MIN_DYNAMIC_DB:
         return identity, (
-            f"소리 크기가 처음부터 끝까지 거의 같아({span:.1f}dB 차이) 무음 제거를 "
-            "건너뜁니다. 잡음이 큰 녹음이거나 쉬는 구간이 없는 녹음입니다."
+            f"Loudness barely changes from start to end ({span:.1f}dB range), so silence "
+            "removal was skipped. Either the recording is noisy or nobody ever pauses."
         )
 
     threshold = floor_db + max(6.0, span * config.TRIM_SENSITIVITY)
@@ -300,28 +310,28 @@ def plan(samples: np.ndarray, sample_rate: int = SAMPLE_RATE) -> tuple[Timeline,
 
     speech = _runs(level > threshold)
     if not speech:
-        return identity, "발화 구간을 찾지 못해 무음 제거를 건너뜁니다."
+        return identity, "No speech regions found, so silence removal was skipped."
 
     min_speech = int(round(config.TRIM_MIN_SPEECH_SEC * sample_rate))
     min_silence = int(round(config.TRIM_MIN_SILENCE_SEC * sample_rate))
-    # pad 는 발화 앞뒤로 넓히는 여유이자, 이어 붙였을 때 두 발화 사이에 그대로
-    # 남는 침묵이기도 하다. 0 이면 서로 다른 발화가 맞붙어 Whisper 가 두 문장을
-    # 하나로 읽어 버리므로 최소치를 둔다.
+    # pad widens each speech region, and it is also exactly the silence left
+    # between two utterances after concatenation. At 0 they butt together and
+    # Whisper reads two sentences as one, hence the floor.
     pad = max(int(round(config.TRIM_PAD_SEC * sample_rate)), int(round(0.05 * sample_rate)))
 
     regions = [(s * frame, min(e * frame, total)) for s, e in speech]
-    # 기침·마우스 클릭 같은 순간 소음까지 붙들면 무음이 잘리지 않는다
+    # Holding on to coughs and mouse clicks would keep the silence around them
     regions = [r for r in regions if r[1] - r[0] >= min_speech]
     if not regions:
-        return identity, "발화 구간이 너무 짧아 무음 제거를 건너뜁니다."
+        return identity, "Speech regions were too short, so silence removal was skipped."
 
-    regions = _merge(regions, min_silence)  # 짧은 숨은 침묵이 아니라 말의 일부다
+    regions = _merge(regions, min_silence)  # a short breath is part of speech, not silence
     regions = [(max(0, s - pad), min(total, e + pad)) for s, e in regions]
-    regions = _merge(regions, 1)  # pad 때문에 겹친 것들을 정리
+    regions = _merge(regions, 1)  # tidy up whatever pad made overlap
 
     timeline = Timeline(regions, total, sample_rate)
     if timeline.kept < sample_rate:
-        return identity, "발화로 판정된 구간이 1초 미만이라 무음 제거를 건너뜁니다."
+        return identity, "Less than a second was judged to be speech, so silence removal was skipped."
     if timeline.kept >= total * 0.98:
-        return identity, None  # 2% 미만이면 복사 비용이 아깝다
+        return identity, None  # under 2% is not worth the copy
     return timeline, None

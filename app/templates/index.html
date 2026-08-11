@@ -3,70 +3,75 @@
 
 {% block content %}
 <section class="card">
-  <h2>음성 파일 업로드</h2>
+  <h2>Upload audio</h2>
   <form id="upload-form">
     <div class="dropzone" id="dropzone">
       <input type="file" id="file" name="file" accept="audio/*,video/*" hidden>
-      <p class="dz-main">여기에 파일을 끌어다 놓거나 <button type="button" class="link" id="pick">찾아보기</button></p>
-      <p class="dz-sub">mp3 · wav · m4a · flac · ogg · mp4 등</p>
+      <p class="dz-main">Drop a file here, or <button type="button" class="link" id="pick">browse</button></p>
+      <p class="dz-sub">mp3 &middot; wav &middot; m4a &middot; flac &middot; ogg &middot; mp4 and more</p>
       <p class="dz-file" id="filename"></p>
     </div>
 
     <div class="grid">
       <label>
-        결과 이름
+        Result name
         <input type="text" id="name" value="{{ default_name }}" placeholder="{{ default_name }}">
-        <small>비워두면 오늘 날짜로 저장됩니다. 같은 이름이 있으면 -2, -3 이 붙습니다.</small>
+        <small>Leave it blank to use today&rsquo;s date. Duplicates get -2, -3 appended.</small>
       </label>
 
       <label>
-        언어
+        Language
         <select id="language">
-          <option value="ko" selected>한국어 (권장)</option>
-          <option value="">자동 감지</option>
-          <option value="en">영어</option>
-          <option value="ja">일본어</option>
-          <option value="zh">중국어</option>
+          <option value="">Auto-detect</option>
+          <option value="en">English</option>
+          <option value="ko">Korean</option>
+          <option value="ja">Japanese</option>
+          <option value="zh">Chinese</option>
         </select>
-        <small>아는 언어면 고정하세요. 잘못 감지되면 하지도 않은 말이 통째로 지어집니다. 한국어로 고정해도 중간에 섞인 영어 문장은 영어로 나옵니다.</small>
+        <small>Pin it when you know the language. A wrong guess makes Whisper invent
+        entire sentences nobody said. Pinning one language still lets individual
+        sentences in another come out correctly.</small>
       </label>
 
       <label>
-        최소 화자 수 <span class="muted">(선택)</span>
-        <input type="number" id="min_speakers" min="1" max="20" placeholder="예: 2">
+        Minimum speakers <span class="muted">(optional)</span>
+        <input type="number" id="min_speakers" min="1" max="20" placeholder="e.g. 2">
       </label>
 
       <label>
-        최대 화자 수 <span class="muted">(선택)</span>
-        <input type="number" id="max_speakers" min="1" max="20" placeholder="예: 4">
-        <small>참석 인원을 알면 넣어주세요. 정확도가 크게 올라갑니다.</small>
+        Maximum speakers <span class="muted">(optional)</span>
+        <input type="number" id="max_speakers" min="1" max="20" placeholder="e.g. 4">
+        <small>If you know how many people attended, say so. It helps a lot.</small>
       </label>
     </div>
 
     <label class="full">
-      용어사전 · 초기 프롬프트
+      Glossary &middot; initial prompt
       <textarea id="initial_prompt" rows="3"
-        placeholder="예) 클로아, KLOA, 스프린트 회고, OKR">{{ glossary }}</textarea>
-      <small>고유명사·회사 용어를 넣으면 인식 정확도가 올라갑니다. 등록된 화자 이름은 자동으로 함께 전달됩니다. 여기 입력한 내용은 다음에도 유지됩니다.</small>
+        placeholder="e.g. KLOA, sprint retro, OKR">{{ glossary }}</textarea>
+      <small>Proper nouns and in-house jargon improve accuracy. Enrolled speaker names
+      are passed along automatically. What you type here is remembered for next time.</small>
     </label>
 
     <label class="toggle full">
       <input type="checkbox" id="use_prompt" checked>
-      용어사전·참석자 이름을 인식 힌트로 사용
+      Use the glossary and participant names as recognition hints
     </label>
-    <small class="hint">끄면 위 내용을 Whisper 에 넘기지 않습니다. 전사 결과에 말한 적 없는 용어나 참석자 이름이 튀어나오면 꺼 보세요. 배치 방식이라 프롬프트가 모든 구간에 반복 적용되어 새어 나올 수 있습니다.</small>
+    <small class="hint">Turning this off keeps the above away from Whisper. Try it if terms
+    or names nobody said start showing up in the transcript &mdash; batched inference applies
+    the prompt to every window, so it can bleed through.</small>
 
-    <button type="submit" class="primary" id="submit">전사 시작</button>
+    <button type="submit" class="primary" id="submit">Start transcription</button>
   </form>
 </section>
 
 <section class="card" id="jobs-card">
-  <h2>작업 현황</h2>
-  <div id="jobs" class="joblist"><p class="muted">작업 없음</p></div>
+  <h2>Jobs</h2>
+  <div id="jobs" class="joblist"><p class="muted">No jobs</p></div>
 </section>
 
 <section class="card">
-  <h2>저장된 결과</h2>
-  <div id="results" class="resultlist"><p class="muted">아직 결과가 없습니다.</p></div>
+  <h2>Saved results</h2>
+  <div id="results" class="resultlist"><p class="muted">Nothing here yet.</p></div>
 </section>
 {% endblock %}

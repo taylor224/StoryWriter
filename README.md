@@ -1,631 +1,674 @@
-# 화자 구분 음성 기록기
+# Speaker-Aware Voice Recorder
 
-로컬(Windows + NVIDIA GPU)에서 도는 음성 → 텍스트 웹 서비스.
-음성 파일을 올리면 **누가 무슨 말을 했는지** 구분해서 기록하고, 한 번 이름을 지정한
-화자는 **다음 파일부터 자동으로 인식**한다.
+A local (Windows + NVIDIA GPU) speech-to-text web service. Upload an audio file
+and it writes down **who said what** — and once you name a speaker, they are
+**recognized automatically in every later file**.
 
 ```
-안차돌 : 안녕하세요 회의를 시작하겠습니다.
-안캐돌 : 네 알겠습니다.
-화자A : 말씀 진행하세요
-화자B : 네 반갑습니다. Hello my name is Taylor.
+Alex Kim : Hi everyone, let's get started.
+Dana Park : Sounds good.
+Speaker A : Go ahead.
+Speaker B : Thanks. 안녕하세요, 반갑습니다.
 ```
 
-쌓인 기록을 Claude 나 ChatGPT 에 올려 두면 나중에 검색하고 물어볼 수 있다 —
-[당신의 일상을 기록하고 검색하세요](#당신의-일상을-기록하고-검색하세요)
+Pile the transcripts into Claude or ChatGPT and you get a searchable personal
+archive — [Record and search your life](#record-and-search-your-life)
 
 ---
 
-## 빠른 시작 (Windows · 클릭 두 번)
+## Quick start (Windows, two double-clicks)
 
-1. [Releases](https://github.com/taylor224/StoryWriter/releases) 에서 zip 을 받아 압축을 푼다
-2. **`install.bat` 더블클릭** — Python·ffmpeg 확인, GPU 자동 감지, 패키지 설치,
-   Hugging Face 토큰 입력까지 한 번에 진행된다 (약 3~5GB 다운로드, 1회만)
-3. **`run.bat` 더블클릭** — 브라우저가 자동으로 열린다
+1. Download the zip from [Releases](https://github.com/taylor224/StoryWriter/releases) and unpack it
+2. **Double-click `install.bat`** — checks Python and ffmpeg, detects your GPU,
+   installs everything and walks you through the Hugging Face token
+   (about 3-5GB downloaded, once)
+3. **Double-click `run.bat`** — your browser opens automatically
 
-`run.bat` 을 먼저 눌러도 된다. 설치가 안 돼 있으면 알아서 `install.bat` 을 부른다.
+You can start with `run.bat` too. If nothing is installed it calls `install.bat` for you.
 
-> **⚠️ Python 은 반드시 [3.13](https://www.python.org/downloads/release/python-31314/) 을 받을 것.**
-> python.org 첫 화면의 최신 버전은 **3.14 인데 whisperx 가 아직 지원하지 않는다.**
-> 설치 화면 맨 아래 **"Add python.exe to PATH" 체크**도 잊지 말 것.
-> (3.14 가 이미 깔려 있어도 지울 필요 없다. `install.bat` 이 `py` 런처로 3.13 을 찾아 쓴다.)
+> **⚠️ Install [Python 3.13](https://www.python.org/downloads/release/python-31314/), not the newest.**
+> The front page of python.org offers **3.14, which whisperx does not support yet.**
+> Do not miss **"Add python.exe to PATH"** at the bottom of the installer.
+> (You do not have to remove an existing 3.14 — `install.bat` finds 3.13 via the `py` launcher.)
 >
-> 화자 구분에는 무료 Hugging Face 토큰이 필요하다 —
-> [토큰 생성](https://hf.co/settings/tokens) 후
-> [모델 페이지](https://huggingface.co/pyannote/speaker-diarization-community-1)
-> 에서 약관 동의. `install.bat` 이 이 과정을 안내한다.
+> Speaker separation needs a free Hugging Face token —
+> [create one](https://hf.co/settings/tokens), then accept the terms on the
+> [model page](https://huggingface.co/pyannote/speaker-diarization-community-1).
+> `install.bat` walks you through it.
 
-아래는 수동 설치 및 상세 설명이다.
+Manual installation and the details are below.
 
 ---
 
-## 어떻게 동작하나
+## How it works
 
-Whisper 는 음성을 글자로 바꿀 뿐 **화자 구분을 못 한다.** 그래서 두 모델을 붙여 쓴다.
+Whisper turns speech into text but **cannot tell speakers apart.** So two models
+are combined.
 
-| 단계 | 사용 모델 | 하는 일 |
+| Stage | Model | What it does |
 |---|---|---|
-| 0. 무음 제거 | 프레임 RMS 에너지 | 긴 침묵을 잘라내고 **원본 시각 복원표**를 만든다 (1·2·3 에 적용) |
-| 0.5 조각 나누기 | — | 긴 파일을 침묵 지점에서 잘라 조각별로 1~3 을 돌린다 |
-| 1. 전사 | WhisperX (faster-whisper `large-v3-turbo`) | 음성 → 텍스트 |
-| 2. 정렬 | wav2vec2 | 단어 단위 타임스탬프 |
-| 3. 화자 분리 | pyannote `speaker-diarization-community-1` | "언제 누가 말했나" 구간 + **화자별 256차원 임베딩** |
-| 3.5 조각 잇기 | 코사인 유사도 + Hungarian 배정 | 조각마다 새로 매겨진 화자 라벨을 하나로 합친다 |
-| 3.6 화자 재병합 | 코사인 + 동시 발화 반증 | 한 사람이 여러 화자로 쪼개진 것을 다시 묶는다 |
-| 3.7 환각 제거 | 규칙 기반 | Whisper 가 지어낸 문장을 버린다 |
-| 4. 화자 인식 | 코사인 유사도 + Hungarian 배정 | 저장된 목소리와 대조해 실명 부여 |
+| 0. Silence removal | frame RMS energy | Cuts long silences and builds a **map back to original times** (applies to 1, 2 and 3) |
+| 0.5 Chunking | — | Splits long files at silence and runs 1-3 per chunk |
+| 1. Transcription | WhisperX (faster-whisper `large-v3-turbo`) | audio -> text |
+| 2. Alignment | wav2vec2 | word-level timestamps |
+| 3. Diarization | pyannote `speaker-diarization-community-1` | "who spoke when" plus a **256-dim embedding per speaker** |
+| 3.5 Stitching | cosine similarity + Hungarian assignment | Merges the per-chunk speaker labels into one set |
+| 3.6 Re-merging | cosine + simultaneous-speech disproof | Rejoins one person who got split into several speakers |
+| 3.7 Hallucination filter | rule-based | Drops sentences Whisper invented |
+| 4. Recognition | cosine similarity + Hungarian assignment | Matches against saved voices and applies real names |
 
-4번이 "한 번 저장한 화자를 자동 인식"의 정체다. 3번이 뱉는 임베딩(목소리 지문)을
-SQLite 에 쌓아두고, 새 파일의 화자 임베딩과 코사인 유사도로 비교한다.
+Stage 4 is what "enroll a speaker once, recognize them forever" actually is. The
+embeddings (voiceprints) from stage 3 accumulate in SQLite, and each new file's
+speaker embeddings are compared against them by cosine similarity.
 
-### 무음 제거와 타임스탬프
+### Silence removal and timestamps
 
-0번은 1·2·3번 **전부**에 적용된다. 그래도 **결과 타임스탬프는 언제나 원본 오디오
-기준이다.**
+Stage 0 applies to **all of** 1, 2 and 3. Even so, **result timestamps are always
+on the original audio's clock.**
 
-잘라낸 파형을 그대로 쓰면 뒤쪽 시각이 잘린 만큼 앞으로 당겨진다. 그래서 어디를
-남겼는지 표(`vad.Timeline`)로 들고 있다가, 각 단계가 결과를 내놓기 직전에 원본
-좌표로 되돌린다.
+Using the trimmed waveform directly would slide everything after a cut earlier by
+however much was removed. So a table (`vad.Timeline`) records what was kept, and
+every stage maps its results back to original coordinates right before returning
+them.
 
-- **전사·정렬** — 정렬이 끝난 직후 모든 세그먼트·단어 시각을 되돌린다
-- **화자 분리** — pyannote 가 뱉은 화자 구간을 되돌린다. 이때 잘린 자리를 넘는
-  구간은 **쪼갠다.** 양 끝만 되돌리면 없앤 침묵까지 그 화자가 말한 것으로 잡혀,
-  침묵 건너편 다른 화자의 단어를 겹침 계산에서 빼앗아 가기 때문
+- **Transcription and alignment** — every segment and word time is mapped back
+  as soon as alignment finishes
+- **Diarization** — pyannote's speaker turns are mapped back, and any turn that
+  crosses a cut is **split.** Mapping only its endpoints would make that speaker
+  own the silence we removed and steal words from whoever is on the far side of it
 
-결과 페이지의 오디오 재생·클릭 이동도 원본 파일 그대로라 어긋나지 않는다.
+Playback and click-to-seek on the result page use the original file, so nothing
+desyncs.
 
-시간이 가장 많이 줄어드는 쪽은 **화자 분리**다. Whisper 는 whisperx 가 이미
-내부 VAD 로 침묵을 건너뛰지만, pyannote 의 세그멘테이션은 슬라이딩 윈도로 파일
-전체를 훑기 때문에 침묵도 그대로 비용이다. 침묵이 40% 인 녹음이면 화자 분리도
-40% 가까이 준다.
+The biggest time saving is in **diarization.** whisperx already skips silence with
+its own internal VAD, but pyannote's segmentation sweeps the whole file with a
+sliding window, so silence costs exactly as much as speech there. On a recording
+that is 40% silence, diarization drops by nearly 40% too.
 
-무음 판정은 별도 모델 없이 20ms 프레임 RMS 로 한다. 잡음 바닥은 파일마다
-다르므로 절대 dB 가 아니라, 그 파일의 조용한 쪽(하위 10%)과 말하는 쪽(상위 5%)
-사이에 기준선을 놓는다. 둘의 차이가 12dB 미만이면 근거가 약하다고 보고 **자르지
-않는다** — 애매할 때 말을 잘라먹는 것보다 원본을 두는 쪽이 낫다.
+Silence detection needs no extra model — just 20ms frame RMS. Because the noise
+floor differs per file, the threshold is not an absolute dB: it sits between that
+file's own quiet side (bottom 10%) and speaking side (top 5%). If those are less
+than 12dB apart the evidence is too weak and **nothing is cut** — leaving the
+original alone beats chopping off someone's words.
 
-끄려면 `.env` 에 `TRIM_SILENCE=false`, CLI 는 `--no-trim`.
+Turn it off with `TRIM_SILENCE=false` in `.env`, or `--no-trim` on the CLI.
 
-### 소리를 다듬는 필터 — 켜기 전에 읽을 것
+### Audio filters — read this before turning one on
 
-**"뚜렷하게" 가 곧 "잘 인식됨" 이 아니다.** Whisper 는 68만 시간의 잡음 섞인
-실제 오디오로 학습돼서 웬만한 잡음에 이미 강하다. 노이즈 제거를 세게 걸면 학습
-때 본 적 없는 인공적인 아티팩트가 생겨 **되레 인식률이 떨어지는 사례가 흔하다.**
-그래서 기본값은 `off` 다.
+**"Cleaner to the ear" does not mean "easier to transcribe."** Whisper was trained
+on 680k hours of noisy real-world audio and is already robust to ordinary noise.
+Aggressive denoising creates artifacts it never saw in training, and **accuracy
+often gets worse.** That is why the default is `off`.
 
-그래도 도움되는 상황이 있어 골라 쓸 수 있게 뒀다 (`.env` 의 `AUDIO_FILTER`).
+There are still situations where they help, so they are available via
+`AUDIO_FILTER` in `.env`.
 
-| 값 | 하는 일 | 언제 |
+| Value | What it does | When |
 |---|---|---|
-| `off` | 아무것도 안 건다 | 기본값 |
-| `voice` | 저역 제거 + 멀리 앉은 사람 목소리 끌어올리기 | 회의실에서 한 명만 마이크에서 멀 때. 스펙트럼을 안 건드려 상대적으로 안전 |
-| `denoise` | 위 + FFT 노이즈 제거 | 팬 소리·화이트노이즈가 계속 깔린 녹음. **위험도 높음** |
-| `declip` | 클리핑 복구 | 찢어지게 녹음된 파일 |
+| `off` | nothing | the default |
+| `voice` | strips low rumble, lifts up whoever sits far from the mic | one person in the room is distant. Leaves the spectrum alone, so relatively safe |
+| `denoise` | the above plus FFT denoising | constant fan or white noise. **Higher risk** |
+| `declip` | repairs clipping | recordings that came out distorted |
 
-직접 ffmpeg 필터 문자열을 넣어도 된다 (`highpass=f=120,dynaudnorm` 등).
+You can also pass an ffmpeg filter string directly (`highpass=f=120,dynaudnorm`).
 
-**켜면 반드시 켜기 전후 결과를 비교할 것.** 필터를 바꾸면 캐시가 무효화되어
-전사부터 다시 도니, 같은 파일을 두 이름으로 돌려 나란히 보면 된다.
+**If you turn one on, compare the results with and without.** Changing the filter
+invalidates the cache and re-transcribes, so running the same file under two names
+and reading them side by side is the easy way.
 
-#### 이건 항상 켜져 있다 — 무음 판정용 저역 제거
+#### This one is always on — the highpass for silence detection
 
-에어컨·프로젝터 팬·책상 진동은 100Hz 아래에 몰려 있다. 사람 귀엔 잘 안 들려도
-RMS 는 통째로 올려서, **무음 판정을 무력화한다.** 실측:
-
-```
-45Hz 웅웅거림 없음  → 무음 31.1초 제거
-45Hz 웅웅거림 있음  → 무음  0.0초 제거   (세기 차이 9.1dB → 12dB 미달)
-   같은 파일 + 80Hz 고역통과 → 무음 31.1초 제거
-```
-
-그래서 무음을 **판정할 때만** 80Hz 아래를 걷어낸다 (`TRIM_HIGHPASS_HZ`).
-걸러낸 파형은 판정에만 쓰고 버린다 — **전사·화자 분리에 넘기는 파형은 원본
-그대로다.** 위에 쓴 이유로 모델에는 손대지 않는 게 낫기 때문.
-
-### 긴 파일은 조각으로 나눠 돌린다
-
-`CHUNK_SEC`(기본 3600초)를 넘는 파일은 조각으로 나눠 처리한다. 속도만의 문제가
-아니다 — pyannote 는 아주 긴 파일에서 **같은 사람을 여러 명으로 갈라놓는다.**
-10시간 동안 목소리도 마이크 상태도 변하기 때문이다.
-
-- **경계는 침묵 한가운데** — 말하는 도중에 자르면 그 단어가 양쪽에서 반씩
-  인식되고 화자 분리도 경계에서 흔들린다. 무음 제거가 찾아 둔 구간을 그대로 쓴다
-- **조각 Timeline 이 원본 좌표를 들고 있다** — 조각 안에서 나온 타임스탬프는
-  되돌리기 한 번이면 곧바로 원본 시각이다. 조각 번호를 들고 다니며 오프셋을
-  더하는 코드가 없다
-- **조각 간 화자는 목소리로 다시 잇는다** (`stitch.py`) — 조각마다 pyannote 가
-  `SPEAKER_00` 부터 새로 매기므로, 임베딩 코사인 유사도로 같은 사람을 찾아
-  하나로 묶는다. 한 조각 안의 두 라벨이 같은 사람으로 뭉치지 않도록 1:1 배정
-- **캐시도 조각 단위** — 7번째 조각에서 죽으면 1~6번은 다시 돌리지 않는다
-
-같은 사람이 여러 명으로 갈라져 나오면 `STITCH_THRESHOLD` 를 낮추고(0.55),
-다른 사람이 한 명으로 뭉치면 올린다(0.75).
-
-### 한 사람이 여러 화자로 쪼개졌을 때
-
-pyannote 는 한 사람을 여러 화자로 쪼개는 일이 잦다. 목소리 톤이 바뀌거나,
-마이크에서 멀어지거나, 파일이 길거나. 그래서 마지막에 **최종 화자들끼리 한 번 더
-대조해 묶는다** (`stitch.collapse`). 조각을 나누지 않은 짧은 파일에도 적용된다.
-
-조각 잇기와 달리 1:1 제약이 없다. 그래서 **한 조각 안에서** pyannote 가 쪼개
-놓은 것도, 조각 잇기가 1:1 때문에 놓친 것도 여기서 잡힌다.
-
-pyannote 의 판단을 뒤집는 일이라 안전장치가 필요한데, **임계값을 높이는 방식은
-쓰지 않았다** — 그러면 조각 잇기가 놓친 쌍을 영영 못 묶기 때문이다. 대신:
-
-- **동시에 말한 적 있는 쌍은 절대 안 묶는다.** 같이 말했다면 같은 사람일 수 없다.
-  이게 유일하게 확실한 반증이다. pyannote 의 겹침 포함 결과에서 뽑아 둔다
-  (겹침 제거판이 아니라 — 그쪽은 겹침이 지워져 있어 아무 정보가 없다)
-- **합칠 때 반증을 물려받는다.** A 를 B 에 합치면, B 와 겹쳐 말한 사람은 A 와도
-  다른 사람이다
-- **평균 연결**(중심 대 중심)로 묶는다. 최대 연결이면 A~B, B~C 가 가까울 때
-  A~C 가 멀어도 셋이 줄줄이 엮인다
-
-무엇을 왜 합쳤는지 결과 페이지와 json 의 `merged_speakers` 에 남는다.
-
-한 사람이 아직도 여럿으로 나뉘면 `MERGE_THRESHOLD` 를 낮추고(0.55~0.60), 다른
-사람이 한 명으로 뭉치면 올린다(0.72~0.78). `0` 이면 이 단계를 끈다.
-
-**가장 확실한 방법은 직접 이름을 붙이는 것이다.** 화자 지정에서 두 화자에게
-**같은 이름**을 주면 한 사람으로 합쳐지고 전사록도 한 줄로 이어진다. 그 목소리들이
-전부 그 사람의 보이스프린트로 등록되므로 다음 파일 인식도 좋아진다.
-
-### 환각(없는 말) 걸러내기
-
-Whisper 는 잡음뿐인 구간에서 학습 데이터에 흔했던 문장을 그대로 뱉는다.
+Air conditioning, projector fans and desk vibration sit below 100Hz. You barely
+hear them, but they raise the RMS across the board and **defeat silence detection
+entirely.** Measured:
 
 ```
-아 아 아 아 아 아 아
-MBC 뉴스 김성현이었습니다
-시청해주셔서 감사합니다
+without a 45Hz hum  ->  31.1s of silence removed
+with a 45Hz hum     ->   0.0s removed   (9.1dB range, under the 12dB guard)
+   same file + 80Hz highpass  ->  31.1s removed
+```
+
+So 80Hz and below is stripped **only for the decision** (`TRIM_HIGHPASS_HZ`). The
+filtered waveform is used to judge and then discarded — **what goes to
+transcription and diarization is the untouched original**, for the reason above.
+
+### Long files are processed in chunks
+
+Files longer than `CHUNK_SEC` (3600s by default) are split. This is not only about
+speed — **pyannote splits one person into several speakers** on very long files,
+because over 10 hours both the voice and the mic situation drift.
+
+- **Boundaries land in the middle of silence** — cutting mid-word gets that word
+  half-recognized on both sides and makes diarization wobble at the seam. It
+  reuses the regions silence removal already found
+- **A chunk Timeline carries original coordinates** — a timestamp from inside a
+  chunk is original-clock after one restore. There is no chunk index threaded
+  around and no offsets added anywhere
+- **Speakers are stitched back by voice** (`stitch.py`) — pyannote numbers from
+  `SPEAKER_00` inside every chunk, so cosine similarity of the embeddings finds
+  the same person again. Assignment is 1:1 so two labels in one chunk can never
+  fuse into one person
+- **The cache is per chunk** — dying on chunk 7 does not re-run chunks 1-6
+
+If one person comes out as several, lower `STITCH_THRESHOLD` (0.55); if different
+people get merged, raise it (0.75).
+
+### When one person is split into several speakers
+
+pyannote splits one person into several speakers often: their tone shifts, they
+move away from the mic, or the file is long. So at the end **the final speakers
+are compared once more and merged** (`stitch.collapse`). This applies to short
+files that were never chunked too.
+
+Unlike stitching there is no 1:1 constraint here. That is what catches splits
+pyannote made **within one chunk**, as well as links stitching missed because of
+its 1:1 assignment.
+
+Overruling pyannote needs a safety net, but **raising the threshold is not it** —
+that would make pairs stitching already missed unmergeable forever. Instead:
+
+- **A pair that ever spoke at the same time is never merged.** If they talked over
+  each other they cannot be one person — the only hard disproof there is. It comes
+  from pyannote's overlap-inclusive annotation (not the overlap-free one, which
+  has that information stripped out)
+- **Disproofs are inherited on merge.** Fold A into B and anyone who talked over B
+  is also not A
+- **Average linkage** (centroid to centroid). Maximum linkage would chain A-B-C
+  together when A~B and B~C are close but A~C is not
+
+What was merged and why appears on the result page and in `merged_speakers` in the json.
+
+If one person is still split, lower `MERGE_THRESHOLD` (0.55-0.60); if different
+people get merged, raise it (0.72-0.78). `0` disables the stage.
+
+**The surest fix is naming them yourself.** Give two speakers **the same name** in
+the assignment panel and they become one person, with their transcript lines
+joined. Every one of those voices is then enrolled as that person's voiceprint,
+so later files recognize them better.
+
+### Filtering out hallucinations
+
+In stretches that are pure noise, Whisper emits sentences that were common in its
+training data.
+
+```
+uh uh uh uh uh uh uh
+This is Kim Sung-hyun, MBC News
 Thanks for watching!
+Subtitles by the Amara.org community
 ```
 
-무음 제거가 이런 구간을 상당수 없애 주지만 잡음이 깔려 있으면 무음으로 판정되지
-않는다. 그래서 텍스트 쪽에서 한 번 더 거른다 (`cleanup.py`).
+Silence removal gets rid of many such stretches, but noisy ones are never judged
+silent, so there is a second screen on the text side (`cleanup.py`).
 
-**원칙: 글자만 보고 지우지 않는다.** `MBC 뉴스 OOO입니다` 도 뉴스 녹음이면 진짜
-발언이고, `다음 시간에 뵙겠습니다` 는 회의 마무리에서 늘 나오는 말이다. 문장이
-상투구처럼 생겼다는 것만으로는 환각이라는 근거가 못 된다. 그래서 두 갈래로 나눈다.
+**The rule: never delete based on the text alone.** "This is Kim Sung-hyun, MBC
+News" is a real utterance if you are transcribing the news, and "see you next
+time" ends half the meetings ever recorded. Looking like boilerplate is not
+evidence. So there are two verdicts.
 
-| 처분 | 조건 | 예 |
+| Verdict | Condition | Example |
 |---|---|---|
-| **지움** | 같은 단어·음절 반복이 60% 이상 | `아 아 아 아 아 아` — 내용이 없어 진짜여도 잃을 게 없다 |
-| **지움** | 상투구 **+ 증거** | `시청해주셔서 감사합니다` 가 정렬 점수 0.05 로 나옴 |
-| **표시** | 상투구인데 증거 없음 | 소리가 글자와 맞는다 → 남긴다 |
-| **표시** | 증거만 있음 | 소리와 글자가 안 맞지만 상투구는 아님 |
+| **drop** | same word or syllable is 60%+ of the text | `uh uh uh uh uh uh` — no content, so nothing is lost even if real |
+| **drop** | boilerplate **+ evidence** | `Thanks for watching` with an alignment score of 0.05 |
+| **flag** | boilerplate, no evidence | the audio does match the words, so it stays |
+| **flag** | evidence only | audio and words disagree, but it is not boilerplate |
 
-"증거"는 오디오 쪽에서 나온 근거 두 가지다.
+"Evidence" means something that came from the audio:
 
-- 정렬 모델이 매긴 단어 신뢰도 평균 < `HALLUCINATION_MIN_SCORE`
-- 길이에 견줘 글자가 터무니없이 적음 — 침묵 30초를 한 문장으로 때우는 게
-  환각의 전형이다 (한국어 정상 발화는 초당 4~8자)
+- mean word confidence from the aligner is below `HALLUCINATION_MIN_SCORE`
+- absurdly few characters for the duration — filling 30 seconds of silence with
+  one sentence is the classic hallucination (normal speech runs 4-8 chars/sec)
 
-**지운 것도 남긴 것도 전부 기록한다.** 결과 페이지에 뜨고, json 의 `dropped` /
-`suspect` 에 원문·시각·이유가 남는다. 그 줄을 눌러 소리를 직접 들어 보면 된다.
-전부 지우려면 `DROP_SUSPECT=true`, 아예 끄려면 `DROP_HALLUCINATION=false`.
+**Both the deletions and the keeps are recorded.** They show on the result page,
+and `dropped` / `suspect` in the json hold the text, the time and the reason.
+Click the line to hear it and decide for yourself. `DROP_SUSPECT=true` removes
+them all; `DROP_HALLUCINATION=false` turns the whole thing off.
 
-패턴 목록에서 **일부러 뺀 것**도 있다: 단독 `감사합니다`·`좋아요`·`구독`,
-`알림 설정`, `다음 시간에 뵙겠습니다`. Whisper 가 환각으로도 뱉는 말이지만
-회의에서 실제로 가장 많이 나오는 말이기도 하다. 목록은 `app/cleanup.py` 의
-`BOILERPLATE` 에 있다.
+Some phrases were **deliberately left out** of the pattern list: bare "thank you",
+"like", "subscribe", "notification settings", "see you next time". Whisper
+hallucinates all of them, but they are also the most common things actually said
+in a meeting. The list lives in `BOILERPLATE` in `app/cleanup.py`.
 
-### 전사록에서 그 부분만 듣기
+### Hearing just one part of the transcript
 
-전사록의 말한 내용을 누르면 **그 구간 오디오만** 재생된다. 다시 누르면 멈춘다.
+Click what someone said and **only that span plays.** Click again to stop.
 
-서버가 그 조각만 잘라서 보낸다 (`/api/results/{name}/clip`). 전체 wav 를
-내려보내지 않는 이유는 10시간 녹음이면 1.1GB 라 다 받을 때까지 아무 소리도 안
-나기 때문이다. 이미 16kHz mono PCM 이라 ffmpeg 를 부를 것도 없이 해당 바이트만
-떠서 헤더를 새로 씌운다 — 클릭 즉시 소리가 난다.
+The server cuts that clip (`/api/results/{name}/clip`). It does not ship the whole
+wav, because a 10-hour recording is 1.1GB and nothing would play until the browser
+had all of it. Since the file is already 16kHz mono PCM, the relevant bytes get a
+fresh header and no ffmpeg is involved — the sound starts the instant you click.
 
-타임스탬프가 원본 기준이라 무음을 잘라냈든 조각으로 나눴든 **재생 위치가
-어긋나지 않는다.** 환각인지 아닌지 귀로 확인할 때 이게 있어야 한다.
+Because timestamps are on the original clock, **playback lines up whether or not
+silence was cut or the file was chunked.** You need that to judge a hallucination
+by ear.
 
 ---
 
-## 설치 (Windows)
+## Installation (Windows)
 
-### 1. 사전 준비
+### 1. Prerequisites
 
 ```powershell
-# Python 3.13 필요. 3.14 는 whisperx 가 아직 지원하지 않는다.
+# Python 3.13 required. whisperx does not support 3.14 yet.
 py -3.13 --version
 
 # ffmpeg
 winget install Gyan.FFmpeg
-# 설치 후 터미널을 새로 열고 확인
+# open a new terminal afterwards and check
 ffmpeg -version
 ```
 
-### 2. 가상환경 + 패키지
+### 2. Virtual environment and packages
 
 ```powershell
 cd C:\dev\whisper
 py -3.13 -m venv .venv
 .venv\Scripts\activate
 
-# PyTorch 는 버전을 고정해서 CUDA 인덱스로 먼저 설치한다. 이유는 아래 표 참고.
+# Install PyTorch first, pinned, from the CUDA index. See the table below for why.
 pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 `
     --index-url https://download.pytorch.org/whl/cu128
 
 pip install -r requirements.txt
 ```
 
-CUDA 인식 확인:
+Confirm CUDA is visible:
 
 ```powershell
 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-# True NVIDIA GeForce RTX 4070 Ti  <- 이렇게 나와야 함
+# True NVIDIA GeForce RTX 4070 Ti  <- this is what you want
 ```
 
-### 3. Hugging Face 토큰
+### 3. Hugging Face token
 
-pyannote 모델은 게이트가 걸려 있어 토큰 + 약관 동의가 필요하다. (무료)
+The pyannote model is gated, so it needs a token and accepted terms. (Free.)
 
-1. https://hf.co/settings/tokens 에서 **read** 토큰 생성
-2. https://huggingface.co/pyannote/speaker-diarization-community-1 접속 → 약관 동의
-3. `.env.example` 을 `.env` 로 복사하고 `HF_TOKEN=hf_...` 채우기
+1. Create a **read** token at https://hf.co/settings/tokens
+2. Open https://huggingface.co/pyannote/speaker-diarization-community-1 and accept the terms
+3. Copy `.env.example` to `.env` and fill in `HF_TOKEN=hf_...`
 
-### 4. 점검
+### 4. Check
 
 ```powershell
-python scripts\smoke.py                 # 환경만 확인
-python scripts\smoke.py 샘플.wav        # 실제 파이프라인까지 확인
+python scripts\smoke.py                 # environment only
+python scripts\smoke.py sample.wav      # also run the real pipeline
 ```
 
-첫 실행 시 모델 약 3GB 를 내려받는다 (`models\` 폴더에 캐시, 이후 오프라인 동작).
+The first run downloads about 3GB of models (cached in `models\`, offline afterwards).
 
-### 5. 실행
+### 5. Run
 
 ```powershell
 run.bat
 ```
 
-브라우저에서 http://127.0.0.1:8000 이 열린다.
+Your browser opens at http://127.0.0.1:8000.
 
 ---
 
-## 설치 (macOS · Apple Silicon)
+## Installation (macOS, Apple Silicon)
 
-**GPU 없이도 돈다.** 다만 Mac 에서는 **GPU 를 거의 못 쓴다.**
+**It runs without a GPU.** That said, on a Mac **the GPU is barely usable.**
 
-| 단계 | Mac GPU (Metal/MPS) | 실제 동작 |
+| Stage | Mac GPU (Metal/MPS) | What actually happens |
 |---|---|---|
-| 전사 (WhisperX → CTranslate2) | **미지원** — CUDA·CPU 전용 | CPU. Apple Accelerate 로 최적화는 됨 |
-| 화자 분리 (pyannote) | 되지만 일부 연산자 미구현 + 타임스탬프 어긋남 보고 | 기본 CPU, `DEVICE=mps` 로 옵트인 |
-| 단어 정렬 (wav2vec2) | 가능 | `DEVICE=mps` 시 GPU |
+| Transcription (WhisperX -> CTranslate2) | **unsupported** — CUDA and CPU only | CPU, optimized through Apple Accelerate |
+| Diarization (pyannote) | works, but some operators are missing and timestamps have drifted | CPU by default, opt in with `DEVICE=mps` |
+| Alignment (wav2vec2) | works | GPU when `DEVICE=mps` |
 
 ```bash
-brew install ffmpeg python@3.13       # 3.14 는 whisperx 미지원
+brew install ffmpeg python@3.13       # whisperx does not support 3.14
 
 python3.13 -m venv .venv
 source .venv/bin/activate
-pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0   # CUDA 인덱스 없이
+pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0   # no CUDA index
 pip install -r requirements.txt
 
-cp .env.example .env                  # HF_TOKEN 채우기
+cp .env.example .env                  # fill in HF_TOKEN
 ```
 
-`.env` 를 Mac 용으로:
+A Mac-friendly `.env`:
 
 ```ini
-WHISPER_MODEL=large-v3-turbo   # CPU 전사는 large-v3 가 너무 느리다
-DEVICE=auto                    # = cpu. GPU 실험하려면 mps
+WHISPER_MODEL=large-v3-turbo   # large-v3 is far too slow on CPU
+DEVICE=auto                    # = cpu. Use mps to experiment with the GPU
 COMPUTE_TYPE=auto              # = int8
 BATCH_SIZE=4
 ```
 
 ```bash
-python scripts/smoke.py        # 어떤 디바이스로 도는지 출력해 준다
+python scripts/smoke.py        # prints which device everything runs on
 ./run.sh
 ```
 
-`DEVICE=mps` 는 화자 분리·정렬만 GPU 로 보낸다. 전사는 어차피 CPU 다.
-pyannote 의 MPS 커널이 불완전해 **타임스탬프가 어긋난 사례**가 보고돼 있으니,
-켰다면 결과에서 화자 경계가 밀리지 않는지 꼭 확인할 것. 이상하면 `DEVICE=cpu`.
+`DEVICE=mps` only moves diarization and alignment to the GPU; transcription stays
+on CPU regardless. pyannote's MPS kernels are incomplete and there are **reports of
+drifting timestamps**, so if you enable it, check that speaker boundaries have not
+shifted. If anything looks off, go back to `DEVICE=cpu`.
 
 ---
 
-## 사용법
+## Usage
 
-### 전사
+### Transcribing
 
-1. 메인 화면에 음성 파일을 끌어다 놓는다
-2. **결과 이름** — 기본값은 오늘 날짜. 중복이면 `-2`, `-3` 이 붙는다
-3. **언어** — 기본값 한국어. **아는 언어면 고정하는 편이 안전하다** (아래 참고)
-4. **최대 화자 수** — 참석 인원을 알면 꼭 넣는다. 정확도가 크게 오른다
-5. **용어사전** — 고유명사·회사 용어를 넣으면 인식 정확도가 오른다. 등록된 화자
-   이름은 자동으로 함께 전달된다. 체크를 끄면 아무것도 넘기지 않는다
-6. `전사 시작`
+1. Drop an audio file onto the main page
+2. **Result name** — defaults to today's date. Duplicates get `-2`, `-3` appended
+3. **Language** — **pin it if you know it** (see below)
+4. **Maximum speakers** — if you know how many attended, enter it. Accuracy improves a lot
+5. **Glossary** — proper nouns and in-house jargon improve accuracy. Enrolled
+   speaker names are passed along automatically. Unchecking the box sends nothing
+6. `Start transcription`
 
-### 인식 결과가 이상할 때
+### When the output looks wrong
 
-**하지도 않은 영어가 잔뜩 나온다 / 말한 적 없는 내용이 섞인다.**
-거의 항상 **언어 감지 실패**다. Whisper 는 지정된 언어로 *반드시* 디코딩하므로,
-한국어 음성을 영어로 잡으면 그럴듯한 영어를 지어낸다. 침묵을 인식하려 할 때도
-같은 일이 벌어진다.
+**Text in a language nobody spoke / content nobody said.**
+Almost always **language detection failure.** Whisper *always* decodes in the
+language it was given, so misreading Korean audio as English makes it produce
+plausible English out of nothing. The same happens when it tries to transcribe silence.
 
-- **언어를 고정한다.** 이것만으로 대부분 해결된다
-- 자동 감지를 쓴다면 결과 화면 상단의 `자동 감지, 확신도 0.xx` 를 확인한다.
-  확신도가 낮거나 경고가 떠 있으면 언어를 고정하고 다시 돌린다
+- **Pin the language.** That alone fixes most cases
+- If you use auto-detect, check `auto-detected, confidence 0.xx` at the top of the
+  result page. Low confidence or a visible warning means you should pin it and re-run
 
-> 자동 감지는 오디오의 여러 지점을 표본으로 뽑아 판정한다. whisperx 기본 동작은
-> **첫 30초만** 보기 때문에, 녹음 앞부분이 침묵이거나 영어 인사말이면 파일 전체가
-> 엉뚱한 언어로 넘어간다. 그래도 표본 판정이 완벽하지는 않으니 아는 언어는 고정하라.
+> Auto-detect samples several points across the audio. whisperx's default behavior
+> looks at **only the first 30 seconds**, so a recording that opens with silence or
+> an English greeting sends the entire file into the wrong language. Sampling is
+> still not perfect, so pin the language when you know it.
 
-**말한 적 없는 참석자 이름이나 용어가 튀어나온다.**
-용어사전 체크박스를 끄고 다시 돌린다. 배치 방식이라 프롬프트가 30초 구간마다
-반복 적용되어 새어 나올 수 있다.
+**Participant names or terms nobody said show up.**
+Uncheck the glossary box and re-run. Batched inference applies the prompt to every
+30-second window, so it can bleed through.
 
-**같은 문장이 계속 반복된다.**
-침묵·잡음 구간의 환각이다. 녹음 앞뒤의 빈 구간을 잘라내면 줄어든다.
+**The same sentence repeats forever.**
+That is a hallucination over silence or noise. Trimming the dead air at the start
+and end reduces it.
 
-결과는 `data\results\<이름>.txt` 와 `<이름>.json` 두 개로 저장된다.
+Results are saved as `data\results\<name>.txt` and `<name>.json`.
 
-### 화자 등록 (핵심)
+### Enrolling speakers (the important part)
 
-**방법 A — 전사 결과에서 지정 (권장)**
+**Option A — from a result (recommended)**
 
-결과 페이지 상단 `화자 지정` 에서 `화자A` 옆에 이름을 넣고 저장.
-그 순간 목소리 지문이 등록되고 txt 가 다시 만들어진다. **재전사 없음, 1초.**
-다음에 올리는 파일부터는 그 사람이 자동으로 실명 표시된다.
+On the result page, type a name next to `Speaker A` under `Assign speakers` and
+save. The voiceprint is enrolled at that moment and the txt is rebuilt.
+**No re-transcription, about a second.** Every file you upload afterwards shows
+that person by name.
 
-**방법 B — 샘플 음성 미리 등록**
+**Option B — enroll a voice sample first**
 
-`화자 관리` 페이지에서 화자를 만들고, 그 사람만 말하는 10~30초 녹음을 올린다.
+Create a speaker on the `Speakers` page and upload 10-30 seconds of only that
+person talking.
 
-같은 사람의 지문이 여러 개 쌓일수록 인식률이 올라간다 (화자당 최대 10개 보관).
-
----
-
-### 실패한 작업 이어서 돌리기
-
-각 단계의 중간 결과는 `data\cache\<이름>\` 에 남는다. 작업이 실패하면 목록에
-**`이어서 재시도`** 버튼이 생기고, 어떤 단계를 재사용하는지 옆에 표시된다.
-
-```
-회의  [오류]  이어서 재시도  오디오 변환 · 음성 인식 · 단어 정렬 재사용
-```
-
-전사가 가장 비싼 단계다. 화자 분리에서 GPU 메모리 부족으로 죽었다면
-`.env` 의 `BATCH_SIZE` 를 낮춘 뒤 재시도하면 **화자 분리부터** 다시 돈다.
-
-캐시는 입력이 같을 때만 쓴다. 언어·용어사전·화자 수를 바꾸거나 같은 이름으로
-다른 파일을 올리면 영향받는 단계부터 다시 계산한다. 성공하면 캐시는 지워진다.
-
-CLI 는 기본이 이어서 돌리기이고, `--no-resume` 으로 끌 수 있다.
+Recognition improves as more voiceprints accumulate for the same person (up to 10
+kept per speaker).
 
 ---
 
-## 출력 파일
+### Resuming a failed job
 
-**`<이름>.txt`** — 연속된 같은 화자 발화는 한 줄로 합쳐진다
+Each stage's intermediate result lives in `data\cache\<name>\`. When a job fails,
+a **`Resume`** button appears in the list along with which stages will be reused.
 
 ```
-안차돌 : 안녕하세요 회의를 시작하겠습니다.
-안캐돌 : 네 알겠습니다.
+meeting  [error]  Resume  reuses audio conversion · transcription · word alignment
 ```
 
-**`<이름>.json`** — 타임스탬프, 단어 단위 정렬, 화자 임베딩, 세그먼트 원본.
-이 파일이 있어서 **화자 이름만 바꿔 txt 를 다시 만들 수 있다** (재전사 불필요).
+Transcription is the expensive stage. If diarization died on GPU memory, lower
+`BATCH_SIZE` in `.env` and retry — it picks up **from diarization.**
 
-`data\uploads\` 에는 업로드 원본과 변환된 `<이름>.16k.wav` 가 함께 남는다.
-(임시로 남는 파일이므로 지워도 결과에는 영향이 없다.)
-1시간 회의면 wav 만 약 115MB 이므로, 디스크가 부족하면 오래된 파일을 지우면 된다
-(결과 txt·json 은 `data\results\` 에 따로 있으므로 지워도 무방하다).
+The cache is only used when the inputs match. Changing the language, glossary or
+speaker counts, or uploading a different file under the same name, recomputes from
+the affected stage onward. On success the cache is cleared.
+
+The CLI resumes by default; `--no-resume` turns it off.
 
 ---
 
-## 당신의 일상을 기록하고 검색하세요
+## Output files
 
-전사만 해두면 결국 안 읽는다. `data\results\` 에 쌓인 텍스트를 **Claude 나 ChatGPT 에
-올려 기억시켜 두면, 나중에 검색하고 물어볼 수 있는 개인 기록 보관소**가 된다.
+**`<name>.txt`** — consecutive lines from the same speaker are joined
 
-회의·통화·강의·인터뷰·혼잣말 메모까지 전부 넣어도 된다.
+```
+Alex Kim : Hi everyone, let's get started.
+Dana Park : Sounds good.
+```
 
-### 1. 쌓기
+**`<name>.json`** — timestamps, word-level alignment, speaker embeddings and the
+raw segments. This file is why **you can rename a speaker and rebuild the txt**
+without re-transcribing anything.
 
-`<이름>.txt` 는 그대로 붙여넣기 좋은 형식이다. 화자 이름이 앞에 붙어 있어
-LLM 이 누가 무슨 말을 했는지 그대로 구분한다.
+`data\uploads\` keeps both the uploaded original and the converted
+`<name>.16k.wav`. Those are scratch files; deleting them does not affect results.
 
-| 서비스 | 방법 |
+An hour of audio is about 115MB of wav alone, so clear out old files if disk space
+runs short (the txt and json live separately in `data\results\`).
+
+---
+
+## Record and search your life
+
+Transcribe-and-forget means you never read them again. Put the text piling up in
+`data\results\` **into Claude or ChatGPT and it becomes a personal archive you can
+search and question.**
+
+Meetings, calls, lectures, interviews, even notes you talk to yourself — all of it works.
+
+### 1. Accumulate
+
+`<name>.txt` is already in a paste-friendly shape. The speaker name is on the front
+of every line, so the LLM keeps track of who said what.
+
+| Service | How |
 |---|---|
-| **Claude** | [Projects](https://claude.ai/projects) 를 하나 만들고 프로젝트 지식에 txt 를 계속 추가한다. 그 프로젝트 안의 모든 대화가 지금까지 쌓은 기록 전체를 참조한다 |
-| **ChatGPT** | Projects 에 파일을 올리거나 대화에 첨부한다 |
+| **Claude** | Create a [Project](https://claude.ai/projects) and keep adding the txt files to its knowledge. Every conversation inside that project can see everything you have accumulated |
+| **ChatGPT** | Upload the files to a Project, or attach them to a conversation |
 
-결과 이름은 기본값이 날짜(`2026-08-10`)라 시간 순서가 그대로 남는다.
-`2026-08-10 팀 스프린트 회고` 처럼 **날짜 + 제목**으로 지으면 나중에 훨씬 잘 찾는다.
+The default result name is the date (`2026-08-10`), so chronological order comes
+for free. Naming them **date + title** (`2026-08-10 team sprint retro`) makes them
+far easier to find later.
 
-화자 이름을 지정해 두면(화자 등록 기능) 검색 품질이 확 올라간다.
-`화자A` 로 남겨 두면 "안차돌이 뭐라고 했지?" 같은 질문에 답할 수 없다.
+Assigning speaker names (the enrollment feature) sharply improves search quality.
+Left as `Speaker A`, nothing can answer "what did Alex say about this?".
 
-### 2. 물어보기
+### 2. Ask
 
 ```
-이 회의록에서 결정된 사항을 담당자·기한과 함께 표로 정리해줘.
+Summarize the decisions from this meeting as a table with owners and deadlines.
 
-지난 3개월 기록 중 '가격 정책' 이야기가 나온 부분을 전부 찾아
-시간순으로 보여줘. 입장이 어떻게 바뀌었는지도 알려줘.
+Find every mention of "pricing policy" across the last three months,
+in chronological order, and tell me how the position changed.
 
-안차돌이 하기로 한 일만 모아서, 아직 완료 언급이 없는 것만 남겨줘.
+Collect everything Alex agreed to do, and keep only the items with no
+mention of completion yet.
 
-지난주에 미뤄진 안건 중 이번 주에도 안 다뤄진 게 있어?
+Was anything deferred last week that also went untouched this week?
 
-이번 달 회의에서 내가 가장 많이 반복한 주제 세 개를 뽑아줘.
+Pick the three topics I repeated most in this month's meetings.
 ```
 
-주간 회고, 인수인계 문서, 프로젝트 히스토리 정리에 특히 쓸 만하다.
+Especially useful for weekly retros, handover documents and project histories.
 
-### 3. 올리기 전에 확인할 것
+### 3. Before you upload anything
 
-**회의록에는 이름·연락처·계약 조건·미공개 정보가 섞여 있다.**
-외부 서비스에 올리는 순간 그 회사 서버에 저장되고, 나중에 지워도 이미 처리된
-기록은 되돌리기 어렵다.
+**Meeting transcripts contain names, contact details, contract terms and
+unreleased information.** The moment you upload them to an external service they
+are stored on that company's servers, and deleting them later does not undo what
+was already processed.
 
-- 올려도 되는 내용인지 먼저 확인한다
-- 참석자가 있는 녹음이라면 **녹음과 외부 업로드에 대한 동의**를 받아 둔다
-- 곤란한 부분만 지우고 올리거나, 민감한 기록은 로컬에만 둔다
+- Confirm the content is something you are allowed to upload
+- If other people are on the recording, get **consent for both the recording and
+  the external upload**
+- Strip the awkward parts before uploading, or keep sensitive transcripts local only
 
 ---
 
-## 버전 고정 이유
+## Why versions are pinned
 
-전부 최신을 쓰지는 **못한다.** whisperx 가 상한을 정한다. (기준일 2026-08-10)
+Not everything can be the latest. **whisperx sets the ceiling.** (As of 2026-08-10.)
 
-| 패키지 | 최신 | 이 프로젝트 | 왜 |
+| Package | Latest | This project | Why |
 |---|---|---|---|
-| Python | 3.14.7 | **3.13** | whisperx 가 `<3.14` 요구 |
-| torch / torchaudio | 2.13.0 | **2.8.0** | whisperx 가 `~=2.8.0` 요구 |
-| torchvision | 0.26.0 | **0.23.0** | whisperx 가 `~=0.23.0` 요구 |
-| torchcodec | 0.15.0 | **0.7.x** | whisperx `<0.8` ∩ pyannote `>=0.7`. torch 2.8 과 ABI 가 맞는 범위이기도 하다 |
-| whisperx | 3.8.6 | 3.8.6 | ✅ 최신 |
-| pyannote.audio | 4.0.7 | 4.0.7 | ✅ 최신 |
-| ctranslate2 | 4.8.1 | 최신 | ✅ 자동 |
-| faster-whisper | 1.2.1 | 최신 | ✅ 자동 |
-| fastapi / uvicorn | 0.141.1 / 0.52.1 | 최신 | ✅ 자동 |
-| numpy / scipy | 2.5.2 / 1.18.0 | 최신 | ✅ 자동 |
+| Python | 3.14.7 | **3.13** | whisperx requires `<3.14` |
+| torch / torchaudio | 2.13.0 | **2.8.0** | whisperx requires `~=2.8.0` |
+| torchvision | 0.26.0 | **0.23.0** | whisperx requires `~=0.23.0` |
+| torchcodec | 0.15.0 | **0.7.x** | whisperx `<0.8` ∩ pyannote `>=0.7`. Also the range that is ABI-compatible with torch 2.8 |
+| whisperx | 3.8.6 | 3.8.6 | ✅ latest |
+| pyannote.audio | 4.0.7 | 4.0.7 | ✅ latest |
+| ctranslate2 | 4.8.1 | latest | ✅ automatic |
+| faster-whisper | 1.2.1 | latest | ✅ automatic |
+| fastapi / uvicorn | 0.141.1 / 0.52.1 | latest | ✅ automatic |
+| numpy / scipy | 2.5.2 / 1.18.0 | latest | ✅ automatic |
 
-**torch 버전 고정이 특히 중요하다.** 최신 torch 를 먼저 깔면, 뒤이어 whisperx 를
-설치할 때 pip 이 `torch~=2.8.0` 을 맞추려고 torch 를 되돌린다. 이때 CUDA 인덱스가
-아니라 PyPI 기본 인덱스에서 받으므로 Windows 에서는 **CPU 전용 휠(230MB)** 이 깔린다.
-설치는 성공한 것처럼 보이지만 GPU 를 전혀 쓰지 못한다.
-`install.bat` 은 마지막 단계에서 `torch.cuda.is_available()` 로 이 상황을 검사한다.
+**Pinning torch matters most.** Install the newest torch first and, when whisperx
+goes in afterwards, pip downgrades it to satisfy `torch~=2.8.0` — pulling from the
+default PyPI index rather than the CUDA one, which on Windows means the
+**CPU-only wheel (230MB)**. The install looks successful while the GPU goes
+completely unused. `install.bat` catches exactly this in its final step with
+`torch.cuda.is_available()`.
 
 ---
 
-## 튜닝
+## Tuning
 
-`.env` 에서 조정한다.
+Everything is set in `.env`.
 
-| 값 | 기본 | 의미 |
+| Setting | Default | Meaning |
 |---|---|---|
-| `TRIM_SILENCE` | `true` | 전사 전 무음 제거. 타임스탬프는 원본 기준으로 되돌려진다 |
-| `TRIM_MIN_SILENCE_SEC` | `0.8` | 이보다 짧은 침묵은 말의 일부로 보고 남긴다 |
-| `TRIM_PAD_SEC` | `0.25` | 발화 앞뒤 여유. **첫소리가 잘려 나가면 올린다** |
-| `TRIM_SENSITIVITY` | `0.30` | 잡음 바닥과 발화 사이 기준선 위치. **말이 잘리면 내리고(0.20), 무음이 안 잘리면 올린다(0.40)** |
-| `TRIM_HIGHPASS_HZ` | `80` | 무음 **판정** 전 저역 제거. 모델에 넘기는 파형은 안 건드린다 |
-| `AUDIO_FILTER` | `off` | `voice` / `denoise` / `declip`. **켜기 전후를 꼭 비교할 것** |
-| `CHUNK_SEC` | `3600` | 이 길이를 넘으면 조각으로 나눠 처리. `0` 이면 끄기 |
-| `STITCH_THRESHOLD` | `0.65` | 조각 간 같은 사람 판정. **한 사람이 여럿으로 갈라지면 내리고(0.55), 여럿이 뭉치면 올린다(0.75)** |
-| `MERGE_THRESHOLD` | `0.65` | 과분할된 화자 재병합. **한 사람이 여럿으로 나뉘면 내리고(0.55), 다른 사람이 뭉치면 올린다(0.75)**. `0` 이면 끔 |
-| `WHISPER_MODEL` | `large-v3-turbo` | 정확도 최우선이면 `large-v3` (몇 배 느림) |
-| `DROP_HALLUCINATION` | `true` | Whisper 가 지어낸 문장 제거 |
-| `HALLUCINATION_MIN_SCORE` | `0.30` | 정렬 신뢰도 하한. `0` 이면 이 증거만 안 씀 |
-| `DROP_SUSPECT` | `false` | `true` 면 "의심"으로 표시만 하던 것도 지운다. **진짜 발언을 잃을 수 있다** |
-| `MATCH_THRESHOLD` | `0.60` | 코사인 유사도 임계값. **다른 사람을 같은 사람으로 착각하면 올리고(0.65~0.70), 같은 사람을 못 알아보면 내린다(0.50~0.55)** |
-| `MATCH_MARGIN` | `0.05` | 1등과 2등 점수 차. 이보다 작으면 애매하다고 보고 매칭 포기 |
-| `MIN_SPEECH_SEC` | `5.0` | 총 발화가 이보다 짧은 화자는 자동 인식하지 않음 |
-| `BATCH_SIZE` | `8` | VRAM 부족(OOM) 시 `4` 로 |
-| `UNLOAD_BETWEEN_STAGES` | `false` | `true` 면 단계마다 모델을 내려 VRAM 을 아낀다 (느려짐) |
+| `TRIM_SILENCE` | `true` | Remove silence before transcription. Timestamps are mapped back to the original clock |
+| `TRIM_MIN_SILENCE_SEC` | `0.8` | Silence shorter than this is kept as part of speech |
+| `TRIM_PAD_SEC` | `0.25` | Headroom around each utterance. **Raise it if first sounds get clipped** |
+| `TRIM_SENSITIVITY` | `0.30` | Where the line sits between noise floor and speech. **Lower it (0.20) if speech is cut, raise it (0.40) if silence is not** |
+| `TRIM_HIGHPASS_HZ` | `80` | Low-cut applied only when **judging** silence. The waveform sent to the models is untouched |
+| `AUDIO_FILTER` | `off` | `voice` / `denoise` / `declip`. **Always compare results with and without** |
+| `CHUNK_SEC` | `3600` | Files longer than this are processed in chunks. `0` disables it |
+| `STITCH_THRESHOLD` | `0.65` | Same-person threshold across chunks. **Lower it (0.55) if one person splits into several, raise it (0.75) if several fuse into one** |
+| `MERGE_THRESHOLD` | `0.65` | Re-merging over-split speakers. **Lower it (0.55) if one person is still split, raise it (0.75) if different people fuse**. `0` disables it |
+| `WHISPER_MODEL` | `large-v3-turbo` | Use `large-v3` when accuracy matters most (several times slower) |
+| `DROP_HALLUCINATION` | `true` | Remove sentences Whisper invented |
+| `HALLUCINATION_MIN_SCORE` | `0.30` | Alignment-confidence floor. `0` drops just this piece of evidence |
+| `DROP_SUSPECT` | `false` | `true` also removes what would only have been flagged. **Real speech can be lost** |
+| `MATCH_THRESHOLD` | `0.60` | Cosine threshold. **Raise it (0.65-0.70) if people get confused for each other, lower it (0.50-0.55) if someone is not recognized** |
+| `MATCH_MARGIN` | `0.05` | Gap between first and second place. Below this the match is abandoned as too close to call |
+| `MIN_SPEECH_SEC` | `5.0` | Speakers with less total speech than this are not auto-recognized |
+| `BATCH_SIZE` | `8` | Drop to `4` on out-of-memory |
+| `UNLOAD_BETWEEN_STAGES` | `false` | `true` unloads models between stages to save VRAM (slower) |
 
-튜닝 근거는 결과 페이지의 `자동 인식 · 유사도 0.xx` 배지에서 얻는다.
-오인식이 났을 때 그 값이 임계값 바로 위였다면 임계값을 올리면 된다.
+The evidence for tuning is on the result page: the `auto-recognized · similarity
+0.xx` badge. If a misidentification happened just above your threshold, raise it.
 
 ---
 
-## 성능
+## Performance
 
-**RTX 4070 Ti (12GB)** — 1시간 오디오 기준
+**RTX 4070 Ti (12GB)** — per hour of audio
 
-- 전사 + 정렬 + 화자 분리 합계 **5~10분**
-- VRAM 약 5~6GB (`large-v3-turbo` fp16 1.6GB + wav2vec2 1GB + pyannote 2.5GB).
-  `large-v3` 로 올리면 8~9GB
-- 훨씬 느리면 CPU 로 떨어진 것 → `python -c "import torch; print(torch.cuda.is_available())"`
+- Transcription + alignment + diarization, **5-10 minutes total**
+- About 5-6GB VRAM (`large-v3-turbo` fp16 1.6GB + wav2vec2 1GB + pyannote 2.5GB).
+  `large-v3` pushes it to 8-9GB
+- Much slower than that means it fell back to CPU →
+  `python -c "import torch; print(torch.cuda.is_available())"`
 
-**Apple Silicon (M1 Max 급, CPU)** — 1시간 오디오 기준 **예상치**
+**Apple Silicon (M1 Max class, CPU)** — per hour of audio, **estimated**
 
-| 모델 | 전사 | 화자분리 | 합계 |
+| Model | Transcription | Diarization | Total |
 |---|---|---|---|
-| `large-v3` | 20~30분 | 10~20분 | **30~50분** |
-| `large-v3-turbo` | 8~12분 | 10~20분 | **20~30분** |
+| `large-v3` | 20-30 min | 10-20 min | **30-50 min** |
+| `large-v3-turbo` | 8-12 min | 10-20 min | **20-30 min** |
 
-`large-v3-turbo` 가 기본값이다. 단어오류율 차이가 평균 0.4%p 수준인데 속도는
-5~8배다. 메모리는 int8 기준 2GB 안팎이라 16GB 램에서도 무리 없다.
-(위 수치는 공개 벤치마크 기반 추정이며 이 저장소에서 실측한 값은 아니다.)
+`large-v3-turbo` is the default. Word error differs by about 0.4pp on average while
+being 5-8x faster. Memory sits around 2GB at int8, so 16GB of RAM is plenty.
+(These figures are estimates from public benchmarks, not measured in this repo.)
 
-**turbo 의 대가:** 디코더가 32층에서 4층으로 줄어든 증류 모델이라 **반복·환각에
-더 잘 빠진다.** 같은 말을 무한히 되풀이하거나 침묵에서 없는 문장을 지어내는
-빈도가 `large-v3` 보다 높다. 무음 제거와 환각 필터를 켜 둔 채로 쓰는 것을
-전제한 기본값이다 (둘 다 기본 켜짐). 결과에 이상한 문장이 자꾸 섞이는데
-필터로도 안 잡히면 `WHISPER_MODEL=large-v3` 로 되돌린다.
+**What turbo costs you:** it is a distilled model whose decoder went from 32 layers
+to 4, so it **falls into repetition and hallucination more easily.** Looping the
+same phrase or inventing sentences over silence happens more often than with
+`large-v3`. This default assumes silence removal and the hallucination filter are
+on (both are, by default). If odd sentences keep appearing and the filter does not
+catch them, go back to `WHISPER_MODEL=large-v3`.
 
 ---
 
-## 트러블슈팅
+## Troubleshooting
 
-| 증상 | 원인 / 해결 |
+| Symptom | Cause / fix |
 |---|---|
-| `No matching distribution found for whisperx` + `Requires-Python >=3.10,<3.14` 목록 | Python 3.14 를 쓰고 있다. [3.13](https://www.python.org/downloads/release/python-31314/) 설치 후 `.venv` 폴더를 지우고 `install.bat` 재실행 |
-| 설치는 됐는데 GPU 를 안 씀 | 최신 torch 가 whisperx 때문에 PyPI CPU 휠로 되돌려진 것. `pip install --force-reinstall torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128` |
-| 하지도 않은 영어가 잔뜩 나옴 | 언어 감지 실패. **언어를 한국어로 고정**하고 재시도 → [자세히](#인식-결과가-이상할-때) |
-| 말의 첫 글자가 자꾸 빠짐 | 무음 제거가 너무 붙여 잘랐다. `TRIM_PAD_SEC=0.4`, 그래도면 `TRIM_SILENCE=false` |
-| 조용한 녹음인데 시간이 안 줄어듦 | 잡음 바닥이 높아 무음 판정이 안 된 것. `TRIM_SENSITIVITY=0.40` 으로 올린다 |
-| `아 아 아 아`, `MBC 뉴스 …입니다` 같은 게 섞임 | Whisper 환각. `DROP_HALLUCINATION=true`(기본)면 자동 제거된다. 계속 남으면 그 문구를 `app/cleanup.py` 의 `BOILERPLATE` 에 추가 |
-| 진짜 한 말이 지워짐 | 결과의 `제외` 목록으로 확인 후 `DROP_HALLUCINATION=false` 또는 `HALLUCINATION_MIN_SCORE=0` |
-| 한 사람이 여러 명으로 나뉨 | `MERGE_THRESHOLD` 를 `0.55` 로 내린다. 긴 파일이면 `STITCH_THRESHOLD` 도 같이 |
-| 다른 사람이 한 명으로 뭉침 | `MERGE_THRESHOLD` 와 `STITCH_THRESHOLD` 를 `0.75` 로 올린다 |
-| 말한 적 없는 참석자 이름·용어가 섞임 | 용어사전 체크박스를 끄고 재시도 |
-| `OSError: [WinError 1314] 클라이언트가 필요한 권한을 가지고 있지 않습니다` | Windows 심볼릭 링크 권한. **`models` 폴더를 지우고 다시 실행**하면 된다 (v0.1.4+ 는 심링크를 쓰지 않는다). 그래도 나면 프로젝트를 바탕화면 대신 `C:\StoryWriter` 처럼 OneDrive 동기화가 없는 경로로 옮기거나, Windows 설정 > 개인 정보 및 보안 > 개발자용 에서 개발자 모드를 켠다 |
-| `torchcodec is not installed correctly` / `Could not load libtorchcodec` | **무시해도 된다.** winget 의 ffmpeg 은 정적 빌드라 torchcodec 이 요구하는 공유 DLL 이 없다. 이 프로젝트는 pyannote 에 디코딩된 파형을 직접 넘기므로 torchcodec 을 타지 않는다 |
-| `Could not locate cudnn_ops64_9.dll` | torch 2.4 미만. CUDA 휠로 재설치 |
-| `torch.cuda.is_available()` 가 False | CPU 전용 휠이 깔림. `pip uninstall torch torchaudio` 후 CUDA 인덱스로 재설치 |
-| 화자 분리 모델 로드 실패 (401/403/None) | HF 토큰 누락 또는 모델 페이지 약관 미동의 |
-| `ffmpeg 를 찾을 수 없습니다` | `winget install Gyan.FFmpeg` 후 터미널 재시작 |
-| CUDA out of memory | `BATCH_SIZE=4`, 그래도 안 되면 `UNLOAD_BETWEEN_STAGES=true` |
-| `ValueError: unsupported device mps` | CTranslate2 는 MPS 를 못 쓴다. 코드가 전사만 CPU 로 돌리도록 처리하므로 `DEVICE=mps` 여도 정상 — 이 오류가 뜨면 `DEVICE=cpu` |
-| Mac 에서 화자 경계가 밀림 | `DEVICE=mps` 의 pyannote MPS 버그. `DEVICE=cpu` 로 |
-| Mac 에서 너무 느림 | `WHISPER_MODEL=large-v3-turbo`, `BATCH_SIZE=4` |
-| 화자를 못 알아봄 | `MATCH_THRESHOLD` 를 낮추거나, 같은 사람 샘플을 더 등록 |
-| 다른 사람을 같은 사람으로 인식 | `MATCH_THRESHOLD` 를 올린다 |
+| `No matching distribution found for whisperx` + a `Requires-Python >=3.10,<3.14` list | You are on Python 3.14. Install [3.13](https://www.python.org/downloads/release/python-31314/), delete the `.venv` folder and re-run `install.bat` |
+| Installed fine but the GPU is unused | The newest torch got downgraded to the PyPI CPU wheel because of whisperx. `pip install --force-reinstall torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128` |
+| Text in a language nobody spoke | Language detection failed. **Pin the language** and re-run → [details](#when-the-output-looks-wrong) |
+| First syllable keeps getting cut off | Silence removal trimmed too tightly. `TRIM_PAD_SEC=0.4`, or `TRIM_SILENCE=false` |
+| Quiet recording but nothing gets faster | A high noise floor blocked the silence decision. Raise `TRIM_SENSITIVITY` to `0.40` |
+| `uh uh uh uh` or broadcast sign-offs appear | Whisper hallucination. `DROP_HALLUCINATION=true` (default) removes them. If one persists, add the phrase to `BOILERPLATE` in `app/cleanup.py` |
+| Something real got deleted | Check the removed list on the result page, then set `DROP_HALLUCINATION=false` or `HALLUCINATION_MIN_SCORE=0` |
+| One person comes out as several | Lower `MERGE_THRESHOLD` to `0.55`. On long files lower `STITCH_THRESHOLD` too |
+| Different people merged into one | Raise `MERGE_THRESHOLD` and `STITCH_THRESHOLD` to `0.75` |
+| Names or terms nobody said appear | Uncheck the glossary box and re-run |
+| `OSError: [WinError 1314] A required privilege is not held by the client` | Windows symlink permissions. **Delete the `models` folder and run again** (v0.1.4+ avoids symlinks). If it persists, move the project off the Desktop to a path with no OneDrive sync such as `C:\StoryWriter`, or turn on Developer Mode under Settings > Privacy & security > For developers |
+| `torchcodec is not installed correctly` / `Could not load libtorchcodec` | **Safe to ignore.** winget's ffmpeg is a static build without the shared DLLs torchcodec wants. This project hands pyannote a decoded waveform, so torchcodec is never used |
+| `Could not locate cudnn_ops64_9.dll` | torch below 2.4. Reinstall from the CUDA index |
+| `torch.cuda.is_available()` is False | The CPU-only wheel got installed. `pip uninstall torch torchaudio`, then reinstall from the CUDA index |
+| Diarization model fails to load (401/403/None) | Missing HF token, or the model page terms were never accepted |
+| `ffmpeg not found` | `winget install Gyan.FFmpeg`, then restart the terminal |
+| CUDA out of memory | `BATCH_SIZE=4`, then `UNLOAD_BETWEEN_STAGES=true` if that is not enough |
+| `ValueError: unsupported device mps` | CTranslate2 cannot use MPS. The code already keeps transcription on CPU, so `DEVICE=mps` is fine — if you see this error, use `DEVICE=cpu` |
+| Speaker boundaries drift on Mac | The pyannote MPS bug under `DEVICE=mps`. Switch to `DEVICE=cpu` |
+| Too slow on Mac | `WHISPER_MODEL=large-v3-turbo`, `BATCH_SIZE=4` |
+| A speaker is not recognized | Lower `MATCH_THRESHOLD`, or enroll more samples of that person |
+| Two people recognized as one | Raise `MATCH_THRESHOLD` |
 
 ---
 
-## 한계
+## Limitations
 
-- **동시 발화는 한 명만 기록된다.** Whisper 가 겹치는 목소리 중 우세한 쪽만 전사한다.
-  화자 배정은 pyannote 가 전사 매칭용으로 내놓는 겹침 제거판(`exclusive_speaker_diarization`)을
-  쓰므로 경계는 깔끔하지만, 묻힌 발화 자체를 되살리지는 못한다
-- **화자 6명 이상이면 정확도가 떨어진다.** 업로드 시 최대 화자 수를 지정하면 개선된다
-- **짧은 발화(5초 미만)는 자동 인식하지 않는다.** 임베딩이 불안정해서 오인식 위험이 크다
-- **무음 제거는 에너지 기준이라 잡음에 약하다.** 에어컨·키보드 소리가 계속 깔리면
-  판정 근거가 약해져 그냥 원본을 쓴다 (잘못 잘리지는 않는다). 반대로 아주 작게
-  속삭인 말은 무음으로 볼 수 있으니, 그런 녹음은 `TRIM_SILENCE=false` 로 둔다
-- **무음을 자르면 화자 경계가 이어 붙인 자리에서 미세하게 흔들릴 수 있다.**
-  발화 앞뒤 `TRIM_PAD_SEC` 만큼은 남기므로 실제 영향은 작지만, 화자 구분이
-  유독 중요한 녹음이라면 `TRIM_SILENCE=false` 로 한 번 더 돌려 비교해 볼 것
+- **Only one voice survives simultaneous speech.** Whisper transcribes whichever
+  voice dominates. Speaker assignment uses pyannote's overlap-free output
+  (`exclusive_speaker_diarization`), so boundaries stay clean, but the buried
+  utterance itself cannot be recovered
+- **Accuracy drops past six speakers.** Specifying the maximum speaker count at
+  upload time helps
+- **Utterances under 5 seconds are not auto-recognized.** The embedding is too
+  unstable and the misidentification risk is high
+- **Silence removal is energy-based, so noise weakens it.** With constant air
+  conditioning or keyboard noise the evidence gets thin and it uses the original
+  untouched (it will not cut wrongly). Conversely a very quiet whisper can read as
+  silence, so use `TRIM_SILENCE=false` for those recordings
+- **Cutting silence can make speaker boundaries wobble slightly at the seams.**
+  `TRIM_PAD_SEC` of headroom stays around every utterance so the real impact is
+  small, but if speaker separation matters unusually much, run it once with
+  `TRIM_SILENCE=false` and compare
 
 ---
 
-## 구조
+## Layout
 
 ```
 app/
-  config.py     설정 (.env) — 다른 모듈보다 먼저 import 되어야 함 (HF_HOME 설정)
-  db.py         SQLite: 화자 / 보이스프린트 / 작업 / 설정
-  audio.py      ffmpeg 로 16kHz mono wav 변환 + wav 구간 읽기
-  vad.py        무음 제거 + 조각 나누기 + 원본 시각 복원표 (Timeline)
-  asr.py        WhisperX 전사 + wav2vec2 정렬 (모델 상주)
-  diarize.py    pyannote 화자 분리 + 임베딩 + 세그먼트 화자 배정
-  stitch.py     조각별 화자 라벨 합치기 + 과분할된 화자 재병합
-  cleanup.py    Whisper 환각(없는 말) 걸러내기
-  matching.py   코사인 유사도 매칭 / 등록
-  render.py     txt·json 생성, 재생성, 화자A/B 라벨링
-  pipeline.py   전체 흐름 + CLI
-  jobs.py       단일 워커 백그라운드 큐
-  main.py       FastAPI 라우트
+  config.py     settings (.env) — must be imported before anything else (sets HF_HOME)
+  db.py         SQLite: speakers / voiceprints / jobs / settings
+  audio.py      ffmpeg conversion to 16kHz mono wav + ranged wav reads
+  vad.py        silence removal + chunking + the map back to original times (Timeline)
+  asr.py        WhisperX transcription + wav2vec2 alignment (models stay resident)
+  diarize.py    pyannote diarization + embeddings + speaker assignment
+  stitch.py     merging per-chunk speaker labels + re-merging over-split speakers
+  cleanup.py    filtering out Whisper hallucinations
+  matching.py   cosine similarity matching / enrollment
+  render.py     txt and json output, regeneration, Speaker A/B labelling
+  pipeline.py   the whole flow + CLI
+  jobs.py       single-worker background queue
+  main.py       FastAPI routes
 scripts/
-  smoke.py      설치 점검 (환경 확인 + 실제 파이프라인 1회 실행)
-  selfcheck.py  무음 제거·조각 나누기·화자 잇기·환각 필터 점검 (모델·GPU 불필요)
+  smoke.py      installation check (environment + one real pipeline run)
+  selfcheck.py  silence removal, chunking, stitching, merging and the hallucination
+                filter (no model or GPU needed)
 data/
   uploads/  results/  samples/  app.db
-models/         HF 모델 캐시
-whisper/        openai/whisper 원본 클론 (참고용, 미사용)
-run.bat         원클릭 실행 (.env 의 HOST/PORT 사용, 브라우저 자동 실행)
+models/         HF model cache
+whisper/        a clone of openai/whisper (reference only, unused)
+run.bat         one-click launch (uses HOST/PORT from .env, opens the browser)
 ```
 
-CLI 로도 쓸 수 있다:
+It also works from the CLI:
 
 ```powershell
-python -m app.pipeline 회의.mp3 --name 2026-08-10 --max-speakers 4
+python -m app.pipeline meeting.mp3 --name 2026-08-10 --max-speakers 4
 ```

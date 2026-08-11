@@ -1,8 +1,9 @@
-"""결과 저장·재생성.
+"""Saving and regenerating results.
 
-data/results/<이름>.txt  — 요청 포맷 그대로 (`이름 : 내용`)
-data/results/<이름>.json — 타임스탬프·임베딩·세그먼트 원본. 화자 이름만 바꿔
-                           txt 를 다시 만들 수 있으므로 재전사가 필요 없다.
+data/results/<name>.txt  — the requested format (`Name : text`)
+data/results/<name>.json — timestamps, embeddings and raw segments. Renaming a
+                           speaker only rebuilds the txt, so nothing is ever
+                           re-transcribed.
 """
 
 import json
@@ -21,7 +22,7 @@ _RESERVED = {
 }
 
 
-# ── 이름 처리 ─────────────────────────────────────────────────────────
+# ── Name handling ─────────────────────────────────────────────────────
 def default_name() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
@@ -38,7 +39,7 @@ def sanitize_name(name: str | None) -> str:
 
 
 def unique_name(name: str) -> str:
-    """이미 있는 이름이면 -2, -3 을 붙인다."""
+    """Append -2, -3 when the name is already taken."""
     base = sanitize_name(name)
     candidate, index = base, 1
     while (config.RESULT_DIR / f"{candidate}.json").exists():
@@ -55,15 +56,15 @@ def json_path(name: str) -> Path:
     return config.RESULT_DIR / f"{sanitize_name(name)}.json"
 
 
-# ── 화자 표시 이름 ────────────────────────────────────────────────────
+# ── Speaker display names ─────────────────────────────────────────────
 def anonymous_label(index: int) -> str:
-    """0 -> 화자A, 25 -> 화자Z, 26 -> 화자AA"""
+    """0 -> Speaker A, 25 -> Speaker Z, 26 -> Speaker AA"""
     letters = ""
     index += 1
     while index > 0:
         index, rem = divmod(index - 1, 26)
         letters = chr(ord("A") + rem) + letters
-    return f"화자{letters}"
+    return f"Speaker {letters}"
 
 
 def assign_displays(
@@ -71,12 +72,12 @@ def assign_displays(
     matches: dict[str, dict[str, Any]],
     anon: dict[str, str] | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """매칭된 화자는 실명, 나머지는 등장 순서대로 화자A/B/C.
+    """Matched speakers get their real name; the rest get Speaker A/B/C in order of appearance.
 
-    anon 에 이미 부여된 익명 라벨을 넘기면 그대로 재사용한다. 한 명에게 이름을
-    지정했다고 나머지 화자의 번호가 밀리면 안 되기 때문.
+    Pass the already-assigned anonymous labels in `anon` to reuse them: naming
+    one person must not shift everyone else's letter.
 
-    반환: (표시이름, 갱신된 익명 라벨 맵)
+    Returns: (display names, updated anonymous label map)
     """
     anon = dict(anon or {})
     taken = {m["name"] for m in matches.values() if m.get("matched") and m.get("name")}
@@ -104,7 +105,7 @@ def assign_displays(
 
 
 def order_labels(segments: list[dict], speech_sec: dict[str, float]) -> list[str]:
-    """첫 등장 시각 순. 세그먼트에 안 나온 화자는 뒤에 붙인다."""
+    """Ordered by first appearance. Speakers absent from the segments go last."""
     seen: list[str] = []
     for seg in segments:
         label = seg.get("speaker")
@@ -116,14 +117,15 @@ def order_labels(segments: list[dict], speech_sec: dict[str, float]) -> list[str
     return seen
 
 
-# ── 텍스트 생성 ───────────────────────────────────────────────────────
+# ── Text generation ───────────────────────────────────────────────────
 def merge_lines(
-    segments: list[dict], displays: dict[str, str], unknown: str = "화자?"
+    segments: list[dict], displays: dict[str, str], unknown: str = "Speaker ?"
 ) -> list[dict[str, Any]]:
-    """연속된 같은 화자의 세그먼트를 한 줄로 합친다.
+    """Merge consecutive segments from the same speaker into one line.
 
-    라벨이 아니라 표시 이름으로 비교한다. 한 사람이 여러 화자로 쪼개져 나왔을 때
-    사용자가 둘에 같은 이름을 붙이면, 그것만으로 한 줄로 합쳐져야 하기 때문.
+    Compares display names rather than labels: when one person came out as
+    several speakers, giving both the same name should be enough to join their
+    lines.
     """
     lines: list[dict[str, Any]] = []
     for seg in segments:
@@ -157,7 +159,7 @@ def timestamp(seconds: float) -> str:
     return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
 
 
-# ── 파일 입출력 ───────────────────────────────────────────────────────
+# ── File I/O ──────────────────────────────────────────────────────────
 def save(payload: dict[str, Any]) -> tuple[Path, Path]:
     name = payload["name"]
     displays = {label: info["display"] for label, info in payload["speakers"].items()}

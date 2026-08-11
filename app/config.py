@@ -1,7 +1,8 @@
-"""전역 설정. 다른 app 모듈보다 먼저 import 되어야 한다.
+"""Global settings. Must be imported before any other app module.
 
-torch / huggingface 를 import 하기 전에 HF_HOME 을 설정해야 모델 캐시가
-프로젝트 안(models/)에 떨어진다. 그래서 이 모듈은 부수효과로 환경변수를 건드린다.
+HF_HOME has to be set before torch/huggingface are imported for the model cache
+to land inside the project (models/). That is why this module sets environment
+variables as a side effect.
 """
 
 import os
@@ -39,131 +40,139 @@ def _bool(env_key: str, default: bool) -> bool:
     return os.getenv(env_key, str(default)).strip().lower() in ("1", "true", "yes", "on")
 
 
-# ── 경로 ──────────────────────────────────────────────────────────────
+# ── Paths ─────────────────────────────────────────────────────────────
 DATA_DIR = _path("DATA_DIR", BASE_DIR / "data")
 UPLOAD_DIR = DATA_DIR / "uploads"
 RESULT_DIR = DATA_DIR / "results"
 SAMPLE_DIR = DATA_DIR / "samples"
-CACHE_DIR = DATA_DIR / "cache"  # 단계별 중간 결과 (재시도 시 이어서 돌리기 위함)
+CACHE_DIR = DATA_DIR / "cache"  # per-stage intermediate results (for resuming a failed job)
 DB_PATH = DATA_DIR / "app.db"
 MODEL_CACHE = _path("MODEL_CACHE", BASE_DIR / "models")
 
 for _d in (DATA_DIR, UPLOAD_DIR, RESULT_DIR, SAMPLE_DIR, CACHE_DIR, MODEL_CACHE):
     _d.mkdir(parents=True, exist_ok=True)
 
-# torch/transformers import 전에 반드시 설정
+# Must be set before torch/transformers are imported
 os.environ.setdefault("HF_HOME", str(MODEL_CACHE))
 os.environ.setdefault("TORCH_HOME", str(MODEL_CACHE / "torch"))
-# 심볼릭 링크 경고 억제 (Windows 에서 개발자 모드 아니면 계속 뜸)
+# Silence the symlink warning (it never stops on Windows outside developer mode)
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
-# Windows 는 관리자이거나 개발자 모드가 아니면 심볼릭 링크를 만들 수 없다.
-# huggingface_hub 는 캐시에서 blobs -> snapshots 를 심링크로 잇는데, 사전 감지가
-# 통과해도 실제 생성에서 WinError 1314 가 날 수 있다. 이때 나는 예외가
-# PermissionError 가 아니라 일반 OSError 라서 라이브러리의 복사 폴백이 동작하지
-# 않고 그대로 터진다. Windows 에서는 아예 심링크를 끄고 파일을 옮겨 저장한다.
-# (새로 받은 blob 은 복사가 아니라 이동이므로 용량이 두 배가 되지는 않는다.)
+# Windows cannot create symlinks unless you are an admin or in developer mode.
+# huggingface_hub links blobs -> snapshots in its cache with symlinks, and even
+# when its pre-flight check passes the actual creation can fail with WinError
+# 1314. That raises a plain OSError rather than PermissionError, so the library's
+# copy fallback never kicks in and the whole thing blows up. On Windows we turn
+# symlinks off entirely and move files instead. (A freshly downloaded blob is
+# moved, not copied, so this does not double the disk usage.)
 if sys.platform.startswith("win"):
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 
-# pyannote 는 import 시점에 torchcodec 로딩 실패를 경고한다. 이 프로젝트는
-# 디코딩된 파형을 직접 넘기므로(diarize.load_waveform) 해당 경로를 타지 않는다.
-# whisperx 도 VAD 때문에 pyannote 를 import 하므로 필터는 여기 있어야 걸린다.
-# 메시지가 개행으로 시작해서 (?s) 없이는 정규식이 매칭되지 않는다.
+# pyannote warns at import time when torchcodec fails to load. This project hands
+# it a decoded waveform directly (diarize.load_waveform), so that path is never
+# taken. whisperx also imports pyannote for its VAD, so the filter has to live
+# here. The message starts with a newline, so the regex needs (?s) to match.
 warnings.filterwarnings(
     "ignore", message=r"(?s).*torchcodec is not installed correctly.*"
 )
 
-# ── 모델 ──────────────────────────────────────────────────────────────
+# ── Models ────────────────────────────────────────────────────────────
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
-# large-v3-turbo 는 디코더를 32층에서 4층으로 줄인 증류 모델이다. 5~8배 빠르고
-# 단어오류율 차이는 평균 0.4%p 수준. 대신 디코더가 얕아 반복·환각에 더 잘 빠지므로
-# 무음 제거(vad)와 환각 필터(cleanup)를 켠 채로 쓰는 것을 전제한다.
-# 정확도가 최우선이면 WHISPER_MODEL=large-v3.
+# large-v3-turbo is a distilled model whose decoder went from 32 layers to 4.
+# It is 5-8x faster for about 0.4pp more word error on average. The shallow
+# decoder does fall into repetition and hallucination more easily, so this
+# default assumes silence removal (vad) and the hallucination filter (cleanup)
+# are both on. Set WHISPER_MODEL=large-v3 when accuracy matters most.
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo").strip()
 DIARIZE_MODEL = os.getenv(
     "DIARIZE_MODEL", "pyannote/speaker-diarization-community-1"
 ).strip()
 
-# ── 하드웨어 ───────────────────────────────────────────────────────────
+# ── Hardware ──────────────────────────────────────────────────────────
 # auto | cuda | mps | cpu
 DEVICE = os.getenv("DEVICE", "auto").strip().lower()
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "auto").strip().lower()
 BATCH_SIZE = _int("BATCH_SIZE", 8)
 UNLOAD_BETWEEN_STAGES = _bool("UNLOAD_BETWEEN_STAGES", False)
 
-# ── 오디오 필터 ────────────────────────────────────────────────────────
-# 전사 전에 ffmpeg 필터를 걸어 소리를 다듬는다. off | voice | denoise | declip
-# 또는 ffmpeg 필터 문자열 (audio.FILTERS 참고).
+# ── Audio filter ──────────────────────────────────────────────────────
+# Clean the sound up with an ffmpeg filter before transcription.
+# off | voice | denoise | declip, or an ffmpeg filter string (see audio.FILTERS).
 #
-# 기본이 off 인 이유: Whisper 는 잡음 섞인 실제 오디오로 학습돼 웬만한 잡음에
-# 이미 강하다. 노이즈 제거를 세게 걸면 학습 때 본 적 없는 아티팩트가 생겨
-# 되레 인식률이 떨어지는 사례가 흔하다. 켤 때는 켜기 전후를 꼭 비교할 것.
+# Why the default is off: Whisper was trained on noisy real-world audio and is
+# already robust to ordinary noise. Aggressive denoising creates artifacts it
+# never saw in training, and accuracy often gets worse. Always compare results
+# with and without before leaving it on.
 AUDIO_FILTER = os.getenv("AUDIO_FILTER", "off").strip()
 
-# ── 무음 제거 (전사 전 잘라내기) ────────────────────────────────────────
-# 잘라낸 만큼 시각이 당겨지는 문제는 vad.Timeline 이 되돌린다. 결과 타임스탬프는
-# 항상 원본 오디오 기준이므로 여기 값을 바꿔도 재생 위치는 어긋나지 않는다.
+# ── Silence removal (cutting before transcription) ────────────────────
+# vad.Timeline undoes the time shift the cutting causes. Result timestamps are
+# always on the original audio's clock, so changing these never desyncs playback.
 TRIM_SILENCE = _bool("TRIM_SILENCE", True)
-# 이 길이 이상 이어지는 침묵만 잘라낸다. 짧은 숨·뜸은 말의 일부다.
+# Only silence at least this long is cut. Short breaths and pauses are speech.
 TRIM_MIN_SILENCE_SEC = _float("TRIM_MIN_SILENCE_SEC", 0.8)
-# 발화 앞뒤로 남겨 둘 여유. 말의 첫소리/끝소리가 잘리는 걸 막는다.
+# Headroom kept around each utterance, so first and last sounds are not clipped.
 TRIM_PAD_SEC = _float("TRIM_PAD_SEC", 0.25)
-# 잡음 바닥과 발화 세기 사이 어디에 기준선을 둘지 (0~1). 올리면 더 많이 잘린다.
+# Where the line sits between the noise floor and speech level (0-1). Higher cuts more.
 TRIM_SENSITIVITY = _float("TRIM_SENSITIVITY", 0.30)
-# 이보다 짧은 소리는 발화로 치지 않는다 (클릭·기침 등)
+# Sounds shorter than this do not count as speech (clicks, coughs)
 TRIM_MIN_SPEECH_SEC = _float("TRIM_MIN_SPEECH_SEC", 0.10)
-# 잡음과 발화의 세기 차가 이 값 미만이면 아예 자르지 않는다
+# If noise and speech are closer than this, do not cut at all
 TRIM_MIN_DYNAMIC_DB = _float("TRIM_MIN_DYNAMIC_DB", 12.0)
-# 무음 판정 전에 이 주파수 아래를 걷어낸다 (Hz). 0 이면 끈다.
-# 에어컨·팬·책상 진동은 100Hz 아래에 몰려 있고, 이게 잡음 바닥을 올려 무음
-# 판정을 방해한다. 판정에만 쓰고 모델에 넘기는 파형은 원본 그대로다.
+# Strip everything below this frequency before judging silence (Hz). 0 disables it.
+# Air conditioning, fans and desk vibration sit below 100Hz and raise the noise
+# floor enough to defeat silence detection. Used only for the decision — what
+# goes to the models is the untouched waveform.
 TRIM_HIGHPASS_HZ = _float("TRIM_HIGHPASS_HZ", 80.0)
 
-# ── 긴 파일 조각 처리 ──────────────────────────────────────────────────
-# 이 길이를 넘으면 조각으로 나눠 돌린다 (0 이면 끄기). 속도뿐 아니라 품질
-# 문제이기도 하다 — pyannote 는 아주 긴 파일에서 같은 사람을 여러 명으로
-# 갈라놓는 경향이 있다. 조각 경계는 침묵 한가운데로 잡고, 조각 간 화자는
-# 목소리 임베딩으로 다시 이어 붙인다 (stitch.py).
+# ── Chunked processing for long files ─────────────────────────────────
+# Files longer than this are processed in chunks (0 disables it). This is about
+# quality as much as speed — pyannote tends to split one person into several
+# speakers on very long files. Chunk boundaries land in the middle of silence,
+# and speakers are stitched back together across chunks by voice (stitch.py).
 CHUNK_SEC = _float("CHUNK_SEC", 3600.0)
-# 조각 간 같은 사람 판정 임계값 (코사인). 같은 녹음·같은 마이크라 등록 화자
-# 대조(MATCH_THRESHOLD)보다 조건이 좋아 조금 높게 잡는다.
+# Cosine threshold for "same person" across chunks. Same session and same mic
+# make this easier than matching enrolled speakers (MATCH_THRESHOLD), so it sits
+# a little higher.
 STITCH_THRESHOLD = _float("STITCH_THRESHOLD", 0.65)
 
-# ── 과분할된 화자 다시 묶기 ────────────────────────────────────────────
-# pyannote 는 한 사람을 여러 화자로 쪼개는 일이 잦다 (목소리 톤 변화, 마이크
-# 거리, 긴 파일). 마지막에 최종 화자들끼리 한 번 더 대조해 묶는다. 0 이면 끈다.
+# ── Re-merging over-split speakers ────────────────────────────────────
+# pyannote splits one person into several speakers often (tone shifts, mic
+# distance, long files). At the end we compare the final speakers once more and
+# merge them. 0 disables it.
 #
-# STITCH_THRESHOLD 보다 높게 잡으면 안 된다. 그러면 조각 잇기가 놓친 쌍은
-# 여기서도 영영 못 묶는다. 같은 값으로 두되, 안전은 임계값이 아니라 "동시에
-# 말한 적 있으면 절대 안 묶는다" 는 반증으로 확보한다.
+# Do not set this above STITCH_THRESHOLD: pairs that stitching already missed
+# would then be unmergeable forever. Keep them equal — safety comes from the
+# "never merge speakers who talked over each other" disproof, not the threshold.
 MERGE_THRESHOLD = _float("MERGE_THRESHOLD", 0.65)
-# 두 화자가 이 시간 이상 동시에 말했으면 절대 같은 사람으로 묶지 않는다.
-# 경계에서 몇십 ms 스치는 건 겹쳐 말한 게 아니라 분할 오차라 걸러야 한다.
+# Two speakers who overlapped for at least this long are never merged.
+# A few tens of ms at a boundary is segmentation slop, not simultaneous speech.
 MERGE_MIN_OVERLAP_SEC = _float("MERGE_MIN_OVERLAP_SEC", 0.5)
 
-# ── 환각 필터 ──────────────────────────────────────────────────────────
-# Whisper 가 잡음 구간에서 지어낸 문장을 걸러낸다. 내용이 없는 반복은 지우고,
-# 상투구는 소리가 글자를 뒷받침하지 않는다는 증거가 있을 때만 지운다.
-# 나머지 의심 구간은 결과에 그대로 두고 표시만 한다 (cleanup.py 참고).
+# ── Hallucination filter ──────────────────────────────────────────────
+# Filters out sentences Whisper invented over noise. Contentless repetition is
+# removed outright; boilerplate is only removed when there is evidence the audio
+# does not back up the text. Everything else questionable stays in the output
+# and is merely flagged (see cleanup.py).
 DROP_HALLUCINATION = _bool("DROP_HALLUCINATION", True)
-# 정렬 모델이 매긴 단어 신뢰도 평균이 이 값 미만이면 소리와 글자가 안 맞는
-# 것으로 본다. 0 이면 이 증거만 쓰지 않는다 (말 속도 검사는 남는다).
+# Mean word confidence from the aligner below this counts as "audio does not
+# match the text". 0 drops just this piece of evidence (the speech-rate check stays).
 HALLUCINATION_MIN_SCORE = _float("HALLUCINATION_MIN_SCORE", 0.30)
-# true 면 "의심"으로 표시만 하던 구간까지 전부 지운다. 진짜 발언을 잃을 수 있다.
+# true also removes everything that would only have been flagged as suspect.
+# Real speech can be lost this way.
 DROP_SUSPECT = _bool("DROP_SUSPECT", False)
 
-# ── 화자 매칭 ──────────────────────────────────────────────────────────
+# ── Speaker matching ──────────────────────────────────────────────────
 MATCH_THRESHOLD = _float("MATCH_THRESHOLD", 0.60)
 MATCH_MARGIN = _float("MATCH_MARGIN", 0.05)
 MIN_SPEECH_SEC = _float("MIN_SPEECH_SEC", 5.0)
 MAX_VOICEPRINTS = _int("MAX_VOICEPRINTS", 10)
 
-# ── 서버 ──────────────────────────────────────────────────────────────
+# ── Server ────────────────────────────────────────────────────────────
 HOST = os.getenv("HOST", "127.0.0.1").strip()
 PORT = _int("PORT", 8000)
 
-# 업로드 허용 확장자 (ffmpeg 가 처리 가능한 것들)
+# Upload extensions we accept (whatever ffmpeg can handle)
 ALLOWED_EXT = {
     ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".aac",
     ".wma", ".mp4", ".mkv", ".mov", ".webm", ".avi",
@@ -171,10 +180,11 @@ ALLOWED_EXT = {
 
 
 def resolve_device() -> str:
-    """pyannote(화자분리)와 wav2vec2(정렬)가 쓸 torch 디바이스.
+    """The torch device for pyannote (diarization) and wav2vec2 (alignment).
 
-    auto 는 mps 를 고르지 않는다. pyannote 의 MPS 커널이 불완전해서 타임스탬프가
-    어긋나는 사례가 보고돼 있기 때문. Apple Silicon 에서 쓰려면 DEVICE=mps 로 명시.
+    auto never picks mps: pyannote's MPS kernels are incomplete and there are
+    reports of timestamps drifting. Set DEVICE=mps explicitly to use it on
+    Apple Silicon.
     """
     if DEVICE == "cpu":
         return "cpu"
@@ -191,10 +201,10 @@ def resolve_device() -> str:
 
 
 def asr_device() -> str:
-    """WhisperX(CTranslate2)가 쓸 디바이스.
+    """The device WhisperX (CTranslate2) will use.
 
-    CTranslate2 는 Metal/MPS 를 지원하지 않는다 (CUDA 아니면 CPU). Apple Silicon
-    에서는 Accelerate 프레임워크로 CPU 추론이 돌아간다.
+    CTranslate2 does not support Metal/MPS — it is CUDA or CPU. On Apple Silicon
+    that means CPU inference through the Accelerate framework.
     """
     device = resolve_device()
     return "cuda" if device == "cuda" else "cpu"
@@ -203,7 +213,7 @@ def asr_device() -> str:
 def resolve_compute_type(device: str) -> str:
     if COMPUTE_TYPE == "auto":
         return "float16" if device == "cuda" else "int8"
-    # CPU 에서 float16 은 CTranslate2 가 거부한다
+    # CTranslate2 refuses float16 on CPU
     if device != "cuda" and COMPUTE_TYPE in ("float16", "fp16"):
         return "int8"
     return COMPUTE_TYPE

@@ -1,17 +1,17 @@
 <!doctype html>
-<html lang="ko">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}화자 구분 음성 기록기{% endblock %}</title>
+  <title>{% block title %}Speaker-Aware Voice Recorder{% endblock %}</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body data-page="{% block page %}{% endblock %}"{% block bodyattrs %}{% endblock %}>
   <header class="topbar">
-    <a class="brand" href="/">🎙️ 화자 구분 음성 기록기</a>
+    <a class="brand" href="/">🎙️ Speaker-Aware Voice Recorder</a>
     <nav>
-      <a href="/">업로드 · 결과</a>
-      <a href="/speakers">화자 관리</a>
+      <a href="/">Upload &middot; Results</a>
+      <a href="/speakers">Speakers</a>
     </nav>
     <span class="health" id="health"></span>
   </header>

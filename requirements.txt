@@ -1,5 +1,5 @@
-# ── 설치 순서 ────────────────────────────────────────────────────────
-# PyTorch 를 먼저, 반드시 버전을 고정해서 설치할 것. 이 파일보다 먼저다.
+# ── Install order ────────────────────────────────────────────────────
+# Install PyTorch FIRST, with pinned versions. Before this file.
 #
 #   NVIDIA GPU (Windows/Linux):
 #     pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 ^
@@ -8,20 +8,21 @@
 #   CPU / macOS:
 #     pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0
 #
-# 왜 최신 torch(2.13) 가 아니라 2.8.0 인가:
-#   whisperx 3.8.6 이 torch~=2.8.0 을 요구한다. 최신 torch 를 먼저 깔면
-#   아래 whisperx 를 설치할 때 pip 이 torch 를 2.8.0 으로 되돌리는데,
-#   이때 PyPI 기본 인덱스에서 받으므로 Windows 에서는 CPU 전용 휠(230MB)이
-#   깔린다. GPU 가 조용히 죽는다. 그래서 처음부터 2.8.0 을 CUDA 인덱스로 받는다.
+# Why torch 2.8.0 and not the latest (2.13):
+#   whisperx 3.8.6 requires torch~=2.8.0. If you install the newest torch first,
+#   installing whisperx below downgrades it to 2.8.0 — and it pulls that from
+#   the default PyPI index, which on Windows means the CPU-only wheel (230MB).
+#   Your GPU then silently stops being used. So we fetch 2.8.0 from the CUDA
+#   index from the start.
 #
-# Python 은 3.13 을 쓸 것. whisperx 가 3.14 를 아직 지원하지 않는다.
+# Use Python 3.13. whisperx does not support 3.14 yet.
 # ─────────────────────────────────────────────────────────────────────
 
 whisperx==3.8.6
 pyannote.audio>=4.0.7
 
-# torchcodec 은 torch 와 ABI 가 묶여 있다. torch 2.8 에는 0.6 또는 0.7 이 맞는다.
-# whisperx 는 <0.8, pyannote 는 >=0.7 을 요구하므로 교집합은 0.7.x 하나뿐이다.
+# torchcodec is ABI-locked to torch. torch 2.8 wants 0.6 or 0.7.
+# whisperx requires <0.8 and pyannote requires >=0.7, so 0.7.x is the only overlap.
 torchcodec>=0.7.0,<0.8.0
 
 fastapi>=0.115.0

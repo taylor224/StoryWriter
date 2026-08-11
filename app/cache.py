@@ -1,15 +1,16 @@
-"""단계별 중간 결과 캐시.
+"""Per-stage intermediate result cache.
 
-전사는 이 파이프라인에서 가장 비싼 단계다. 뒤쪽 화자 분리에서 실패했다고
-전사를 다시 돌리는 건 낭비다. 각 단계의 출력을 디스크에 남겨 두고, 재시도할 때
-입력이 그대로면 건너뛴다.
+Transcription is by far the most expensive stage here. Redoing it because
+diarization failed afterwards is pure waste. So every stage writes its output to
+disk, and a retry skips any stage whose inputs are unchanged.
 
-각 캐시는 "키"를 함께 저장한다. 키는 그 단계의 결과를 좌우하는 입력들이다.
-키가 하나라도 다르면 캐시를 무시하고 다시 계산한다. 언어나 프롬프트를 바꿔
-재시도했는데 옛 결과가 살아남는 사고를 막기 위해서다.
+Each cache entry stores a "key" alongside the value. The key is whatever inputs
+determine that stage's result. If any part of the key differs the cache is
+ignored and the stage recomputes — that is what stops an old result from
+surviving a retry with a different language or prompt.
 
-어떤 단계의 출력 "형식"을 바꾸게 되면 그 단계의 키에 버전 값을 하나 넣어야
-한다. 그러지 않으면 옛 형식의 캐시를 새 코드가 그대로 읽는다.
+If you ever change the *shape* of a stage's output, add a version value to that
+stage's key. Otherwise new code will happily read caches in the old format.
 """
 
 import json
@@ -28,7 +29,7 @@ def _path(name: str, stage: str) -> Path:
 
 
 def audio_key(path: Path) -> dict[str, Any]:
-    """원본 오디오를 식별하는 값. 같은 이름으로 다른 파일을 올리면 달라진다."""
+    """Identifies the source audio. Changes if a different file is uploaded under the same name."""
     try:
         stat = path.stat()
     except OSError:
@@ -37,7 +38,7 @@ def audio_key(path: Path) -> dict[str, Any]:
 
 
 def load(name: str, stage: str, key: dict[str, Any]) -> dict[str, Any] | None:
-    """키가 일치하는 캐시만 돌려준다. 없거나 어긋나면 None."""
+    """Returns the cached value only when the key matches. None if missing or stale."""
     path = _path(name, stage)
     if not path.exists():
         return None
@@ -51,14 +52,14 @@ def load(name: str, stage: str, key: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _jsonable(obj: Any) -> Any:
-    """whisperx 출력에는 numpy 스칼라가 섞여 있어 그대로는 직렬화되지 않는다."""
+    """whisperx output contains numpy scalars, which do not serialize as-is."""
     import numpy as np
 
     if isinstance(obj, np.generic):
         return obj.item()
     if isinstance(obj, np.ndarray):
         return obj.tolist()
-    raise TypeError(f"직렬화할 수 없는 값: {type(obj).__name__}")
+    raise TypeError(f"Cannot serialize value of type {type(obj).__name__}")
 
 
 def save(name: str, stage: str, key: dict[str, Any], value: Any) -> None:
@@ -69,11 +70,11 @@ def save(name: str, stage: str, key: dict[str, Any], value: Any) -> None:
         json.dumps({"key": key, "value": value}, ensure_ascii=False, default=_jsonable),
         encoding="utf-8",
     )
-    tmp.replace(path)  # 쓰다 죽어도 반쪽짜리 캐시가 남지 않도록
+    tmp.replace(path)  # so a crash mid-write cannot leave half a cache behind
 
 
 def stages(name: str) -> list[str]:
-    """이 작업에 남아 있는 캐시 단계 목록."""
+    """Which cache stages still exist for this job."""
     folder = _dir(name)
     if not folder.is_dir():
         return []

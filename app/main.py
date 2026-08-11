@@ -1,4 +1,4 @@
-"""FastAPI 앱: 업로드 / 결과 / 화자 관리."""
+"""FastAPI app: uploads, results and speaker management."""
 
 import json
 import shutil
@@ -20,17 +20,17 @@ BASE = Path(__file__).resolve().parent
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init()
-    db.reset_stale_jobs()  # 서버가 작업 도중 죽었을 때 남은 running 정리
+    db.reset_stale_jobs()  # clean up rows left running when the server died mid-job
     jobs.start()
     yield
 
 
-app = FastAPI(title="화자 구분 음성 기록기", lifespan=lifespan)
+app = FastAPI(title="Speaker-Aware Voice Recorder", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
 
-# ── 페이지 ────────────────────────────────────────────────────────────
+# ── Pages ─────────────────────────────────────────────────────────────
 @app.get("/")
 def page_index(request: Request):
     return templates.TemplateResponse(
@@ -47,7 +47,7 @@ def page_index(request: Request):
 def page_result(request: Request, name: str):
     payload = render.load(name)
     if payload is None:
-        raise HTTPException(404, f"결과를 찾을 수 없습니다: {name}")
+        raise HTTPException(404, f"Result not found: {name}")
     return templates.TemplateResponse(
         request, "result.html", {"name": payload["name"]}
     )
@@ -58,7 +58,7 @@ def page_speakers(request: Request):
     return templates.TemplateResponse(request, "speakers.html")
 
 
-# ── 진단 ──────────────────────────────────────────────────────────────
+# ── Diagnostics ───────────────────────────────────────────────────────
 @app.get("/api/health")
 def api_health():
     info: dict[str, Any] = {
@@ -82,11 +82,11 @@ def api_health():
         if torch.cuda.is_available():
             info["gpu"] = torch.cuda.get_device_name(0)
     except Exception as exc:  # noqa: BLE001
-        info["resolved_device"] = f"torch 로드 실패: {exc}"
+        info["resolved_device"] = f"failed to load torch: {exc}"
     return info
 
 
-# ── 작업 ──────────────────────────────────────────────────────────────
+# ── Jobs ──────────────────────────────────────────────────────────────
 @app.post("/api/jobs")
 async def api_create_job(
     file: UploadFile,
@@ -101,8 +101,8 @@ async def api_create_job(
     if suffix not in config.ALLOWED_EXT:
         raise HTTPException(
             400,
-            f"지원하지 않는 형식입니다: {suffix or '(확장자 없음)'} — "
-            f"허용: {', '.join(sorted(config.ALLOWED_EXT))}",
+            f"Unsupported format: {suffix or '(no extension)'} — "
+            f"allowed: {', '.join(sorted(config.ALLOWED_EXT))}",
         )
 
     result_name = _reserve_name(name)
@@ -116,13 +116,14 @@ async def api_create_job(
 
     if staged.stat().st_size == 0:
         staged.unlink(missing_ok=True)
-        raise HTTPException(400, "빈 파일입니다.")
+        raise HTTPException(400, "The file is empty.")
 
     if initial_prompt is not None:
         db.set_setting(pipeline.GLOSSARY_KEY, initial_prompt.strip())
 
-    # 끄면 참석자 이름과 용어사전을 Whisper 에 아예 넘기지 않는다.
-    # 배치 방식이라 프롬프트가 모든 구간에 반복 적용되어 새어 나올 수 있다.
+    # Turning this off keeps participant names and the glossary away from Whisper
+    # entirely. Batched inference applies the prompt to every window, so it can
+    # bleed into the transcript.
     wants_prompt = use_prompt.strip().lower() not in ("0", "false", "off", "")
     params = {
         "language": language.strip(),
@@ -131,7 +132,7 @@ async def api_create_job(
         ),
         "min_speakers": _opt_int(min_speakers),
         "max_speakers": _opt_int(max_speakers),
-        "source": str(staged),  # 재시도할 때 원본을 다시 찾기 위해 남긴다
+        "source": str(staged),  # kept so a retry can find the original again
     }
     job_id = db.create_job(result_name, file.filename or staged.name, params)
     jobs.submit(job_id, staged, params)
@@ -140,12 +141,12 @@ async def api_create_job(
 
 @app.post("/api/jobs/{job_id}/retry")
 def api_retry_job(job_id: int):
-    """실패한 작업을 이어서 다시 돌린다. 입력이 같은 단계는 캐시를 재사용한다."""
+    """Resume a failed job. Stages whose inputs are unchanged reuse their cache."""
     job = db.get_job(job_id)
     if job is None:
-        raise HTTPException(404, "작업을 찾을 수 없습니다.")
+        raise HTTPException(404, "Job not found.")
     if job["status"] in ("queued", "running"):
-        raise HTTPException(409, "이미 대기 중이거나 진행 중인 작업입니다.")
+        raise HTTPException(409, "That job is already queued or running.")
 
     try:
         params = json.loads(job["params"] or "{}")
@@ -155,12 +156,12 @@ def api_retry_job(job_id: int):
     source = Path(params.get("source") or "")
     if not source.exists():
         raise HTTPException(
-            400, "원본 오디오가 남아 있지 않습니다. 파일을 다시 업로드해 주세요."
+            400, "The original audio is gone. Please upload the file again."
         )
 
     done = cache.stages(job["name"])
     db.update_job(
-        job_id, status="queued", stage="대기 중", progress=0, error="", finished_at=""
+        job_id, status="queued", stage="Queued", progress=0, error="", finished_at=""
     )
     jobs.submit(job_id, source, params)
     return {"ok": True, "job_id": job_id, "resumed_from": done}
@@ -170,7 +171,7 @@ def api_retry_job(job_id: int):
 def api_list_jobs(limit: int = 30):
     rows = db.list_jobs(limit)
     for row in rows:
-        # 실패한 작업이 어디까지 남아 있는지 UI 에서 알려 주기 위함
+        # So the UI can show how far a failed job got
         row["cached_stages"] = (
             cache.stages(row["name"]) if row["status"] == "error" else []
         )
@@ -181,12 +182,12 @@ def api_list_jobs(limit: int = 30):
 def api_get_job(job_id: int):
     job = db.get_job(job_id)
     if job is None:
-        raise HTTPException(404, "작업을 찾을 수 없습니다.")
+        raise HTTPException(404, "Job not found.")
     job["cached_stages"] = cache.stages(job["name"])
     return job
 
 
-# ── 결과 ──────────────────────────────────────────────────────────────
+# ── Results ───────────────────────────────────────────────────────────
 @app.get("/api/results")
 def api_list_results():
     return {"results": render.list_results()}
@@ -196,8 +197,8 @@ def api_list_results():
 def api_get_result(name: str):
     payload = render.load(name)
     if payload is None:
-        raise HTTPException(404, "결과를 찾을 수 없습니다.")
-    # 임베딩과 단어 배열은 화면에서 안 쓰고 용량만 크다 (1시간 회의면 수백 KB)
+        raise HTTPException(404, "Result not found.")
+    # The UI uses neither embeddings nor word arrays, and they are big (hundreds of KB per hour)
     slim = dict(payload)
     slim["speakers"] = _strip_embeddings(payload.get("speakers", {}))
     slim["segments"] = [
@@ -210,22 +211,22 @@ def api_get_result(name: str):
 
 @app.get("/api/results/{name}/clip")
 def api_clip(name: str, start: float = 0.0, end: float = 0.0):
-    """전사록 한 줄에 해당하는 오디오 조각. 그 줄을 눌렀을 때 재생용.
+    """The audio for one transcript line, played when that line is clicked.
 
-    전체 wav 를 내려보내지 않는다. 10시간 녹음이면 1.1GB 라 브라우저가 다
-    받을 때까지 아무 소리도 안 난다.
+    We do not ship the whole wav: a 10-hour recording is 1.1GB, and nothing would
+    play until the browser had all of it.
     """
     payload = render.load(name)
     if payload is None:
-        raise HTTPException(404, "결과를 찾을 수 없습니다.")
+        raise HTTPException(404, "Result not found.")
 
-    # audio_file 은 우리가 쓴 값이지만, 결과 json 은 사용자가 만질 수 있는
-    # 파일이다. 파일명만 취해 UPLOAD_DIR 밖으로 나가지 못하게 한다.
+    # We wrote audio_file ourselves, but the result json is a file the user can
+    # edit. Take only the filename so nothing can escape UPLOAD_DIR.
     wav_path = config.UPLOAD_DIR / Path(payload.get("audio_file") or "").name
     if not wav_path.is_file():
-        raise HTTPException(404, "원본 오디오가 없습니다 (uploads 폴더에서 지워졌을 수 있습니다).")
+        raise HTTPException(404, "Source audio is missing (it may have been deleted from uploads).")
 
-    # 첫 소리가 잘려 들리지 않도록 앞뒤로 아주 조금 넓혀 준다
+    # Widen very slightly on both sides so the first sound is not clipped
     data = audio.clip_wav(wav_path, max(0.0, start - 0.15), end + 0.25)
     return Response(
         content=data,
@@ -238,16 +239,16 @@ def api_clip(name: str, start: float = 0.0, end: float = 0.0):
 def api_download(name: str, fmt: str = "txt"):
     path = render.txt_path(name) if fmt == "txt" else render.json_path(name)
     if not path.exists():
-        raise HTTPException(404, "파일이 없습니다.")
+        raise HTTPException(404, "File not found.")
     return FileResponse(path, filename=path.name, media_type="application/octet-stream")
 
 
 @app.post("/api/results/{name}/speakers")
 def api_label_speakers(name: str, body: dict[str, Any] = Body(...)):
-    """화자 이름 확정 → 보이스프린트 등록 → txt 재생성 (재전사 없음)."""
+    """Confirm speaker names -> enroll voiceprints -> rebuild the txt (no re-transcription)."""
     payload = render.load(name)
     if payload is None:
-        raise HTTPException(404, "결과를 찾을 수 없습니다.")
+        raise HTTPException(404, "Result not found.")
 
     assignments = body.get("assignments") or []
     speakers = payload.get("speakers") or {}
@@ -265,18 +266,18 @@ def api_label_speakers(name: str, body: dict[str, Any] = Body(...)):
         if speaker_id:
             existing = db.get_speaker(int(speaker_id))
             if existing is None:
-                raise HTTPException(404, f"화자 id {speaker_id} 를 찾을 수 없습니다.")
+                raise HTTPException(404, f"Speaker id {speaker_id} not found.")
             raw_name = existing["name"]
 
         if not raw_name:
-            # 지정 해제 — 등록도 취소
+            # Unassigned — also cancel the enrollment
             db.delete_voiceprints_from_source(source)
-            entry.update(speaker_id=None, matched=False, manual=False, reason="사용자가 지정 해제")
+            entry.update(speaker_id=None, matched=False, manual=False, reason="unassigned by user")
             continue
 
         sid = db.upsert_speaker(raw_name)
         entry.update(speaker_id=sid, matched=True, manual=True, display=raw_name,
-                     reason="사용자 지정")
+                     reason="set by user")
         if entry.get("embedding"):
             matching.enroll(
                 sid, entry["embedding"], source=source,
@@ -284,7 +285,7 @@ def api_label_speakers(name: str, body: dict[str, Any] = Body(...)):
             )
             enrolled.append(raw_name)
 
-    # 미지정 화자의 화자A/B/C 는 그대로 유지한다 (한 명 이름 지었다고 번호가 밀리면 안 됨)
+    # Keep Speaker A/B/C for unnamed speakers (naming one must not shift the others)
     ordered = list(speakers.keys())
     matches = {
         label: {"matched": bool(info.get("speaker_id")),
@@ -313,11 +314,11 @@ def api_label_speakers(name: str, body: dict[str, Any] = Body(...)):
 @app.delete("/api/results/{name}")
 def api_delete_result(name: str):
     if not render.delete(name):
-        raise HTTPException(404, "결과를 찾을 수 없습니다.")
+        raise HTTPException(404, "Result not found.")
     return {"ok": True}
 
 
-# ── 화자 ──────────────────────────────────────────────────────────────
+# ── Speakers ──────────────────────────────────────────────────────────
 @app.get("/api/speakers")
 def api_list_speakers():
     people = db.list_speakers()
@@ -330,7 +331,7 @@ def api_list_speakers():
 def api_create_speaker(body: dict[str, Any] = Body(...)):
     name = (body.get("name") or "").strip()
     if not name:
-        raise HTTPException(400, "이름을 입력하세요.")
+        raise HTTPException(400, "Please enter a name.")
     return {"id": db.upsert_speaker(name, body.get("note", ""))}
 
 
@@ -338,13 +339,13 @@ def api_create_speaker(body: dict[str, Any] = Body(...)):
 def api_rename_speaker(speaker_id: int, body: dict[str, Any] = Body(...)):
     new_name = (body.get("name") or "").strip()
     if not new_name:
-        raise HTTPException(400, "이름을 입력하세요.")
+        raise HTTPException(400, "Please enter a name.")
     current = db.get_speaker(speaker_id)
     if current is None:
-        raise HTTPException(404, "화자를 찾을 수 없습니다.")
+        raise HTTPException(404, "Speaker not found.")
     clash = db.get_speaker_by_name(new_name)
     if clash and int(clash["id"]) != speaker_id:
-        raise HTTPException(409, f"'{new_name}' 은(는) 이미 있는 화자입니다.")
+        raise HTTPException(409, f"A speaker named '{new_name}' already exists.")
 
     db.rename_speaker(speaker_id, new_name)
     updated = _propagate_rename(speaker_id, new_name) if body.get("update_results") else 0
@@ -354,7 +355,7 @@ def api_rename_speaker(speaker_id: int, body: dict[str, Any] = Body(...)):
 @app.delete("/api/speakers/{speaker_id}")
 def api_delete_speaker(speaker_id: int):
     if db.get_speaker(speaker_id) is None:
-        raise HTTPException(404, "화자를 찾을 수 없습니다.")
+        raise HTTPException(404, "Speaker not found.")
     db.delete_speaker(speaker_id)
     return {"ok": True}
 
@@ -363,11 +364,11 @@ def api_delete_speaker(speaker_id: int):
 async def api_add_sample(speaker_id: int, file: UploadFile):
     person = db.get_speaker(speaker_id)
     if person is None:
-        raise HTTPException(404, "화자를 찾을 수 없습니다.")
+        raise HTTPException(404, "Speaker not found.")
 
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in config.ALLOWED_EXT:
-        raise HTTPException(400, f"지원하지 않는 형식입니다: {suffix or '(확장자 없음)'}")
+        raise HTTPException(400, f"Unsupported format: {suffix or '(no extension)'}")
 
     safe = render.sanitize_name(f"{person['name']}-{db.now().replace(':', '')}")
     raw_path = config.SAMPLE_DIR / f"{safe}{suffix}"
@@ -380,12 +381,12 @@ async def api_add_sample(speaker_id: int, file: UploadFile):
 
     wav_path = config.SAMPLE_DIR / f"{safe}.wav"
     try:
-        # 전사할 때와 같은 필터를 건다. 다르게 처리한 오디오로 보이스프린트를
-        # 뜨면 나중에 결과와 대조할 때 같은 목소리가 다르게 보인다.
+        # Apply the same filter transcription uses. A voiceprint taken from
+        # differently-processed audio makes the same voice look different later.
         audio.to_wav16k(raw_path, wav_path, config.AUDIO_FILTER)
         length = audio.duration_sec(wav_path)
         if length < 3:
-            raise HTTPException(400, "샘플이 너무 짧습니다. 10초 이상을 권장합니다.")
+            raise HTTPException(400, "The sample is too short. At least 10 seconds is recommended.")
         vector, speech = diarize.embed_single_speaker(wav_path)
     except HTTPException:
         raise
@@ -398,7 +399,7 @@ async def api_add_sample(speaker_id: int, file: UploadFile):
     return {"ok": True, "speech_sec": round(speech or length, 2)}
 
 
-# ── 설정 ──────────────────────────────────────────────────────────────
+# ── Settings ──────────────────────────────────────────────────────────
 @app.get("/api/settings")
 def api_get_settings():
     return {"glossary": db.get_setting(pipeline.GLOSSARY_KEY, "")}
@@ -411,15 +412,15 @@ def api_set_settings(body: dict[str, Any] = Body(...)):
     return {"ok": True}
 
 
-# ── 헬퍼 ──────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────
 _name_lock = threading.Lock()
 
 
 def _reserve_name(requested: str) -> str:
-    """결과 이름을 선점한다.
+    """Claim a result name.
 
-    render.unique_name 만 쓰면 결과 파일이 아직 없는 대기/진행 중 작업과
-    이름이 겹칠 수 있다. 큐에 올라간 이름까지 확인한다.
+    render.unique_name alone can collide with a queued or running job that has no
+    result file yet, so this checks the queued names too.
     """
     with _name_lock:
         base = render.sanitize_name(requested or render.default_name())
@@ -446,7 +447,7 @@ def _opt_int(value: str) -> int | None:
 
 
 def _propagate_rename(speaker_id: int, new_name: str) -> int:
-    """이 화자로 지정된 기존 결과들의 표시 이름과 txt 를 갱신한다."""
+    """Refresh display names and txt files for existing results assigned to this speaker."""
     count = 0
     for item in render.list_results():
         payload = render.load(item["name"])
@@ -469,14 +470,14 @@ def _http_error(request: Request, exc: HTTPException):
 
 
 def serve() -> None:
-    """run.bat 진입점. .env 의 HOST/PORT 를 그대로 쓴다."""
+    """Entry point for run.bat. Uses HOST/PORT from .env as-is."""
     import threading
     import webbrowser
 
     import uvicorn
 
     url = f"http://{config.HOST}:{config.PORT}"
-    print(f"\n  {url}  에서 열립니다.\n")
+    print(f"\n  Opening at {url}\n")
     threading.Timer(2.0, lambda: webbrowser.open(url)).start()
     uvicorn.run("app.main:app", host=config.HOST, port=config.PORT)
 

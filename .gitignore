@@ -7,5 +7,5 @@ venv/
 __pycache__/
 *.pyc
 
-# 참고용으로 클론해 둔 openai/whisper 원본 (자체 .git 을 가진 별도 저장소)
+# A clone of openai/whisper kept for reference (separate repo with its own .git)
 whisper/

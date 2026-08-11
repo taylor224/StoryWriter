@@ -1,6 +1,6 @@
 "use strict";
 
-// ── 공통 ────────────────────────────────────────────────────────────
+// ── Shared ──────────────────────────────────────────────────────────
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (value) =>
   String(value ?? "").replace(/[&<>"']/g, (c) =>
@@ -43,14 +43,14 @@ async function showHealth() {
   try {
     const info = await api("/api/health");
     const problems = [];
-    if (!info.hf_token) problems.push("HF_TOKEN 없음");
-    if (!info.ffmpeg) problems.push("ffmpeg 없음");
+    if (!info.hf_token) problems.push("HF_TOKEN missing");
+    if (!info.ffmpeg) problems.push("ffmpeg missing");
 
     const where =
       info.asr_device === "cuda"
         ? `GPU: ${info.gpu || "cuda"}`
-        : `CPU 모드 (${info.compute_type})` +
-          (info.resolved_device === "mps" ? " · 화자분리 MPS" : "");
+        : `CPU mode (${info.compute_type})` +
+          (info.resolved_device === "mps" ? " · diarization on MPS" : "");
     el.textContent = problems.length
       ? `⚠ ${problems.join(" · ")} · ${where}`
       : `${where} · ${info.whisper_model}`;
@@ -60,7 +60,7 @@ async function showHealth() {
   }
 }
 
-// ── 업로드 페이지 ────────────────────────────────────────────────────
+// ── Upload page ─────────────────────────────────────────────────────
 function initIndex() {
   const dropzone = $("#dropzone");
   const fileInput = $("#file");
@@ -96,11 +96,11 @@ function initIndex() {
 
   $("#upload-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!fileInput.files.length) return toast("파일을 선택하세요.");
+    if (!fileInput.files.length) return toast("Please choose a file.");
 
     const button = $("#submit");
     button.disabled = true;
-    button.textContent = "업로드 중…";
+    button.textContent = "Uploading…";
 
     const form = new FormData();
     form.append("file", fileInput.files[0]);
@@ -113,15 +113,15 @@ function initIndex() {
 
     try {
       const result = await api("/api/jobs", { method: "POST", body: form });
-      toast(`작업 등록됨: ${result.name}`);
+      toast(`Job queued: ${result.name}`);
       fileInput.value = "";
       filename.textContent = "";
       refreshJobs();
     } catch (error) {
-      toast(`업로드 실패: ${error.message}`, 8000);
+      toast(`Upload failed: ${error.message}`, 8000);
     } finally {
       button.disabled = false;
-      button.textContent = "전사 시작";
+      button.textContent = "Start transcription";
     }
   });
 
@@ -132,12 +132,12 @@ function initIndex() {
 
 let lastActiveCount = 0;
 
-// 재시도 시 건너뛸 수 있는 단계 이름
+// Stage names that a retry can skip
 const STAGE_NAMES = {
-  audio: "오디오 변환",
-  transcribe: "음성 인식",
-  align: "단어 정렬",
-  diarize: "화자 분리",
+  audio: "audio conversion",
+  transcribe: "transcription",
+  align: "word alignment",
+  diarize: "diarization",
 };
 
 async function refreshJobs() {
@@ -152,7 +152,7 @@ async function refreshJobs() {
 
   const jobs = data.jobs || [];
   if (!jobs.length) {
-    container.innerHTML = '<p class="muted">작업 없음</p>';
+    container.innerHTML = '<p class="muted">No jobs</p>';
     return;
   }
 
@@ -160,11 +160,11 @@ async function refreshJobs() {
     .map((job) => {
       const cls = job.status === "done" ? "done" : job.status === "error" ? "error" : "";
       const label =
-        { queued: "대기", running: "진행 중", done: "완료", error: "오류" }[job.status] ||
+        { queued: "queued", running: "running", done: "done", error: "error" }[job.status] ||
         job.status;
       const link =
         job.status === "done"
-          ? `<a href="/result/${encodeURIComponent(job.name)}">결과 보기</a>`
+          ? `<a href="/result/${encodeURIComponent(job.name)}">View result</a>`
           : "";
       const error = job.error
         ? `<div class="job-error">${esc(job.error)}</div>`
@@ -174,9 +174,9 @@ async function refreshJobs() {
       if (job.status === "error") {
         const kept = (job.cached_stages || []).map((s) => STAGE_NAMES[s] || s);
         const hint = kept.length
-          ? `${kept.join(" · ")} 재사용`
-          : "처음부터";
-        retry = `<button data-retry="${job.id}" title="${esc(hint)}">이어서 재시도</button>
+          ? `reuses ${kept.join(" · ")}`
+          : "starts over";
+        retry = `<button data-retry="${job.id}" title="${esc(hint)}">Resume</button>
                  <span class="job-stage">${esc(hint)}</span>`;
       }
 
@@ -200,12 +200,12 @@ async function refreshJobs() {
         const kept = (result.resumed_from || []).map((s) => STAGE_NAMES[s] || s);
         toast(
           kept.length
-            ? `재시도 시작. ${kept.join(" · ")} 단계는 다시 계산하지 않습니다.`
-            : "재시도 시작."
+            ? `Retry started. These stages will not be recomputed: ${kept.join(" · ")}.`
+            : "Retry started."
         );
         refreshJobs();
       } catch (error) {
-        toast(`재시도 실패: ${error.message}`, 8000);
+        toast(`Retry failed: ${error.message}`, 8000);
         button.disabled = false;
       }
     })
@@ -223,11 +223,11 @@ async function refreshResults() {
   try {
     ({ results } = await api("/api/results"));
   } catch (error) {
-    container.innerHTML = `<p class="muted">목록을 불러오지 못했습니다: ${esc(error.message)}</p>`;
+    container.innerHTML = `<p class="muted">Could not load the list: ${esc(error.message)}</p>`;
     return;
   }
   if (!results.length) {
-    container.innerHTML = '<p class="muted">아직 결과가 없습니다.</p>';
+    container.innerHTML = '<p class="muted">Nothing here yet.</p>';
     return;
   }
   container.innerHTML = results
@@ -240,7 +240,7 @@ async function refreshResults() {
         <span class="result-meta">${esc(item.created_at.replace("T", " "))} · ${hhmmss(
         item.duration
       )} · ${esc(item.language)}</span>
-        <button class="danger" data-del="${esc(item.name)}">삭제</button>
+        <button class="danger" data-del="${esc(item.name)}">Delete</button>
       </div>`
     )
     .join("");
@@ -248,15 +248,15 @@ async function refreshResults() {
   container.querySelectorAll("[data-del]").forEach((button) =>
     button.addEventListener("click", async () => {
       const name = button.dataset.del;
-      if (!confirm(`'${name}' 결과를 삭제할까요? (txt·json 파일이 지워집니다)`)) return;
+      if (!confirm(`Delete the result '${name}'? Its txt and json files will be removed.`)) return;
       await api(`/api/results/${encodeURIComponent(name)}`, { method: "DELETE" });
-      toast("삭제됨");
+      toast("Deleted");
       refreshResults();
     })
   );
 }
 
-// ── 결과 페이지 ─────────────────────────────────────────────────────
+// ── Result page ─────────────────────────────────────────────────────
 let resultData = null;
 
 async function initResult() {
@@ -265,20 +265,20 @@ async function initResult() {
 
   const detection = resultData.language_detection || {};
   const lang = detection.auto
-    ? `언어 ${resultData.language} (자동 감지, 확신도 ${detection.confidence ?? "?"})`
-    : `언어 ${resultData.language} (고정)`;
-  // 무음을 잘라내거나 조각으로 나눠 인식했어도 타임스탬프는 원본 기준이라
-  // 재생 위치는 그대로다
+    ? `Language ${resultData.language} (auto-detected, confidence ${detection.confidence ?? "?"})`
+    : `Language ${resultData.language} (pinned)`;
+  // Even with silence cut out or the file processed in chunks, timestamps stay
+  // on the original clock, so playback positions are unaffected
   const trim = resultData.trim || {};
   const notes = [];
-  if (trim.enabled) notes.push(`무음 ${hhmmss(trim.removed)} 제외하고 인식`);
+  if (trim.enabled) notes.push(`transcribed with ${hhmmss(trim.removed)} of silence removed`);
   if ((resultData.chunks || []).length > 1)
-    notes.push(`${resultData.chunks.length}개 조각으로 처리`);
+    notes.push(`processed in ${resultData.chunks.length} chunks`);
   if ((resultData.dropped || []).length)
-    notes.push(`환각 ${resultData.dropped.length}건 제외`);
+    notes.push(`${resultData.dropped.length} hallucination(s) removed`);
   $("#result-meta").textContent =
     `${(resultData.created_at || "").replace("T", " ")} · ${hhmmss(resultData.duration)} · ` +
-    `${lang} · 원본 ${resultData.source_file}` +
+    `${lang} · source ${resultData.source_file}` +
     (notes.length ? ` · ${notes.join(" · ")}` : "");
 
   const warnings = $("#warnings");
@@ -302,18 +302,18 @@ function renderSpeakerPanel() {
   const rows = Object.entries(resultData.speakers || {})
     .map(([label, info]) => {
       const known = info.speaker_id ? info.display : "";
-      let badge = `<span class="badge">미지정</span>`;
-      if (info.manual) badge = `<span class="badge auto">직접 지정</span>`;
+      let badge = `<span class="badge">unassigned</span>`;
+      if (info.manual) badge = `<span class="badge auto">set manually</span>`;
       else if (info.matched)
-        badge = `<span class="badge auto">자동 인식 · 유사도 ${(info.score || 0).toFixed(2)}</span>`;
+        badge = `<span class="badge auto">auto-recognized · similarity ${(info.score || 0).toFixed(2)}</span>`;
       else if (info.reason) badge = `<span class="badge" title="${esc(info.reason)}">${esc(info.reason)}</span>`;
 
       return `<div class="sp-row" data-label="${esc(label)}">
         <span class="sp-label">${esc(info.display)}</span>
-        <span class="sp-stat">발화 ${hhmmss(info.total_speech)} · ${esc(label)}</span>
+        <span class="sp-stat">${hhmmss(info.total_speech)} spoken · ${esc(label)}</span>
         ${badge}
         <input type="text" list="speaker-names" value="${esc(known)}"
-               placeholder="이름 입력 (비우면 지정 해제)">
+               placeholder="Enter a name (blank to unassign)">
       </div>`;
     })
     .join("");
@@ -321,8 +321,8 @@ function renderSpeakerPanel() {
   $("#speaker-panel").innerHTML = datalist + rows;
 }
 
-// 전사록 한 줄을 누르면 그 구간만 재생한다. 서버가 그 조각만 잘라 주므로
-// 10시간짜리라도 즉시 소리가 난다 (전체 wav 는 1.1GB 다).
+// Clicking a transcript line plays just that span. The server cuts the clip, so
+// even a 10-hour recording starts instantly (the whole wav would be 1.1GB).
 let player = null;
 let playingLine = null;
 
@@ -339,7 +339,7 @@ function stopPlayback() {
 }
 
 function playLine(row) {
-  if (playingLine === row) return stopPlayback(); // 같은 줄을 다시 누르면 정지
+  if (playingLine === row) return stopPlayback(); // clicking the same line stops it
   stopPlayback();
 
   if (!player) {
@@ -367,7 +367,7 @@ function renderTranscript() {
       (line) => `<div class="line" data-start="${line.start}" data-end="${line.end}">
         <button class="who" data-jump="${esc(line.speaker || "")}">${esc(line.name)}</button>
         ${showTime ? `<span class="time">${hhmmss(line.start)}</span>` : ""}
-        <button class="said" title="눌러서 이 부분만 듣기">${esc(line.text)}</button>
+        <button class="said" title="Click to hear just this part">${esc(line.text)}</button>
       </div>`
     )
     .join("");
@@ -392,7 +392,7 @@ function renderTranscript() {
 async function saveSpeakers() {
   const button = $("#save-speakers");
   button.disabled = true;
-  button.textContent = "저장 중…";
+  button.textContent = "Saving…";
 
   const assignments = [...document.querySelectorAll(".sp-row")].map((row) => ({
     label: row.dataset.label,
@@ -411,18 +411,18 @@ async function saveSpeakers() {
     renderTranscript();
     toast(
       response.enrolled.length
-        ? `저장 완료. 목소리 등록: ${response.enrolled.join(", ")} — 다음 파일부터 자동 인식됩니다.`
-        : "저장 완료."
+        ? `Saved. Enrolled: ${response.enrolled.join(", ")} — they will be recognized automatically from now on.`
+        : "Saved."
     );
   } catch (error) {
-    toast(`저장 실패: ${error.message}`, 8000);
+    toast(`Save failed: ${error.message}`, 8000);
   } finally {
     button.disabled = false;
-    button.textContent = "화자 저장 · 텍스트 다시 만들기";
+    button.textContent = "Save speakers · rebuild text";
   }
 }
 
-// ── 화자 관리 페이지 ─────────────────────────────────────────────────
+// ── Speakers page ───────────────────────────────────────────────────
 function initSpeakers() {
   $("#new-speaker").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -432,7 +432,7 @@ function initSpeakers() {
     try {
       await jsonPost("/api/speakers", { name });
       input.value = "";
-      toast(`'${name}' 추가됨`);
+      toast(`Added '${name}'`);
       renderSpeakers();
     } catch (error) {
       toast(error.message, 6000);
@@ -445,7 +445,7 @@ async function renderSpeakers() {
   const container = $("#speaker-list");
   const { speakers } = await api("/api/speakers");
   if (!speakers.length) {
-    container.innerHTML = '<p class="muted">등록된 화자가 없습니다.</p>';
+    container.innerHTML = '<p class="muted">No speakers enrolled yet.</p>';
     return;
   }
 
@@ -454,26 +454,26 @@ async function renderSpeakers() {
       (person) => `<div class="sp-card" data-id="${person.id}">
         <div class="sp-head">
           <strong>${esc(person.name)}</strong>
-          <span class="badge">보이스프린트 ${person.voiceprint_count}개 · 학습 음성 ${hhmmss(
+          <span class="badge">${person.voiceprint_count} voiceprint(s) · ${hhmmss(
         person.total_speech
       )}</span>
           <span class="spacer"></span>
           <label class="toggle"><input type="file" accept="audio/*,video/*" data-sample="${person.id}" hidden>
-            <button type="button" data-pick="${person.id}">샘플 음성 추가</button></label>
-          <button type="button" data-rename="${person.id}">이름 변경</button>
-          <button type="button" class="danger" data-remove="${person.id}">삭제</button>
+            <button type="button" data-pick="${person.id}">Add voice sample</button></label>
+          <button type="button" data-rename="${person.id}">Rename</button>
+          <button type="button" class="danger" data-remove="${person.id}">Delete</button>
         </div>
         ${
           person.voiceprints.length
             ? `<ul class="vp-list">${person.voiceprints
                 .map(
                   (vp) =>
-                    `<li>${esc(vp.source || "출처 없음")} · ${hhmmss(vp.speech_sec)} · ${esc(
+                    `<li>${esc(vp.source || "no source")} · ${hhmmss(vp.speech_sec)} · ${esc(
                       (vp.created_at || "").replace("T", " ")
                     )}</li>`
                 )
                 .join("")}</ul>`
-            : '<p class="muted">보이스프린트 없음 — 샘플을 올리거나 전사 결과에서 이름을 지정하세요.</p>'
+            : '<p class="muted">No voiceprints yet — upload a sample or assign a name on a result page.</p>'
         }
       </div>`
     )
@@ -490,16 +490,16 @@ async function renderSpeakers() {
       if (!input.files.length) return;
       const form = new FormData();
       form.append("file", input.files[0]);
-      toast("샘플 분석 중… (모델 로딩에 시간이 걸릴 수 있습니다)", 15000);
+      toast("Analyzing the sample… (loading the model can take a while)", 15000);
       try {
         const result = await api(`/api/speakers/${input.dataset.sample}/samples`, {
           method: "POST",
           body: form,
         });
-        toast(`등록 완료 · 학습 음성 ${result.speech_sec.toFixed(1)}초`);
+        toast(`Enrolled · ${result.speech_sec.toFixed(1)}s of voice`);
         renderSpeakers();
       } catch (error) {
-        toast(`등록 실패: ${error.message}`, 10000);
+        toast(`Enrollment failed: ${error.message}`, 10000);
       } finally {
         input.value = "";
       }
@@ -510,16 +510,16 @@ async function renderSpeakers() {
     button.addEventListener("click", async () => {
       const card = button.closest(".sp-card");
       const current = $("strong", card).textContent;
-      const next = prompt("새 이름", current);
+      const next = prompt("New name", current);
       if (!next || next.trim() === current) return;
-      const updateResults = confirm("기존 결과 파일의 이름도 함께 바꿀까요?");
+      const updateResults = confirm("Also update the name in existing result files?");
       try {
         const result = await jsonPost(
           `/api/speakers/${button.dataset.rename}`,
           { name: next.trim(), update_results: updateResults },
           "PATCH"
         );
-        toast(`변경됨. 갱신된 결과 ${result.updated_results}건`);
+        toast(`Renamed. ${result.updated_results} result(s) updated`);
         renderSpeakers();
       } catch (error) {
         toast(error.message, 6000);
@@ -530,15 +530,15 @@ async function renderSpeakers() {
   container.querySelectorAll("[data-remove]").forEach((button) =>
     button.addEventListener("click", async () => {
       const name = $("strong", button.closest(".sp-card")).textContent;
-      if (!confirm(`'${name}' 화자와 등록된 목소리를 모두 삭제할까요?`)) return;
+      if (!confirm(`Delete the speaker '${name}' and every enrolled voiceprint?`)) return;
       await api(`/api/speakers/${button.dataset.remove}`, { method: "DELETE" });
-      toast("삭제됨");
+      toast("Deleted");
       renderSpeakers();
     })
   );
 }
 
-// ── 부팅 ────────────────────────────────────────────────────────────
+// ── Boot ────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
   showHealth();
   const page = document.body.dataset.page;
@@ -546,6 +546,6 @@ document.addEventListener("DOMContentLoaded", () => {
   if (boot) {
     Promise.resolve()
       .then(boot)
-      .catch((error) => toast(`오류: ${error.message}`, 8000));
+      .catch((error) => toast(`Error: ${error.message}`, 8000));
   }
 });

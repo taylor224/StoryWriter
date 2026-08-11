@@ -1,10 +1,10 @@
-"""등록된 화자와 신규 화자 임베딩을 대조해 이름을 자동으로 붙인다.
+"""Match new speaker embeddings against enrolled speakers and name them automatically.
 
-핵심:
-  - 코사인 유사도 (모든 벡터는 L2 정규화 저장 → 내적 = 코사인)
-  - 화자별 점수는 상위 2개 보이스프린트의 평균 (단일 최댓값은 노이즈에 취약)
-  - Hungarian 알고리즘으로 1:1 배정 → 두 사람이 같은 이름으로 뭉치는 사고 방지
-  - 임계값 + 1등/2등 마진을 둘 다 통과해야 이름 확정
+How it works:
+  - Cosine similarity (all vectors are stored L2-normalized, so a dot product is the cosine)
+  - A speaker's score is the mean of their top 2 voiceprints (a single max is noise-prone)
+  - Hungarian assignment makes it 1:1, so two people cannot collapse into one name
+  - A name is only confirmed when it clears both the threshold and the first/second margin
 """
 
 from typing import Any
@@ -15,7 +15,7 @@ from . import config, db
 
 
 def _score(vec: np.ndarray, profile_vectors: np.ndarray, top_k: int = 2) -> float:
-    """정규화된 벡터 하나와 프로필 벡터 묶음의 유사도."""
+    """Similarity between one normalized vector and a profile's set of vectors."""
     if profile_vectors.size == 0 or profile_vectors.shape[1] != vec.shape[0]:
         return -1.0
     sims = profile_vectors @ vec
@@ -28,9 +28,9 @@ def match(
     speech_sec: dict[str, float],
     profiles: list[dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """{라벨: {matched, speaker_id, name, score, runner_up, reason}} 반환.
+    """Returns {label: {matched, speaker_id, name, score, runner_up, reason}}.
 
-    embeddings 는 {'SPEAKER_00': 벡터} 형태. 정규화는 여기서 한다.
+    embeddings looks like {'SPEAKER_00': vector}. Normalization happens here.
     """
     if profiles is None:
         profiles = db.load_profiles()
@@ -49,7 +49,7 @@ def match(
     }
     if not labels or not profiles:
         for label in labels:
-            out[label]["reason"] = "등록된 화자 없음"
+            out[label]["reason"] = "no enrolled speakers"
         return out
 
     normed = {label: db.normalize(embeddings[label]) for label in labels}
@@ -59,7 +59,7 @@ def match(
         for j, profile in enumerate(profiles):
             scores[i, j] = _score(normed[label], profile["vectors"])
 
-    # 발화가 너무 짧으면 임베딩이 불안정하므로 아예 후보에서 제외
+    # Too little speech makes the embedding unstable, so drop them from the running entirely
     too_short = {
         label for label in labels if speech_sec.get(label, 0.0) < config.MIN_SPEECH_SEC
     }
@@ -67,8 +67,8 @@ def match(
         if label in too_short:
             scores[i, :] = -1.0
             out[label]["reason"] = (
-                f"발화 {speech_sec.get(label, 0.0):.1f}초 — "
-                f"{config.MIN_SPEECH_SEC:.0f}초 미만이라 자동 인식 생략"
+                f"only {speech_sec.get(label, 0.0):.1f}s of speech — under "
+                f"{config.MIN_SPEECH_SEC:.0f}s, so auto-recognition was skipped"
             )
 
     from scipy.optimize import linear_sum_assignment
@@ -89,13 +89,13 @@ def match(
             continue
         if score < config.MATCH_THRESHOLD:
             info["reason"] = (
-                f"최고 유사도 {score:.3f} < 임계값 {config.MATCH_THRESHOLD:.2f}"
+                f"best similarity {score:.3f} < threshold {config.MATCH_THRESHOLD:.2f}"
             )
             continue
         if runner_up > 0 and (score - runner_up) < config.MATCH_MARGIN:
             info["reason"] = (
-                f"1등 {score:.3f} / 2등 {runner_up:.3f} — 차이가 "
-                f"{config.MATCH_MARGIN:.2f} 미만이라 애매함"
+                f"first {score:.3f} vs second {runner_up:.3f} — gap is under "
+                f"{config.MATCH_MARGIN:.2f}, too close to call"
             )
             continue
 
@@ -107,6 +107,6 @@ def match(
 
 
 def enroll(speaker_id: int, vector, source: str, speech_sec: float = 0.0) -> None:
-    """같은 출처의 기존 벡터를 지우고 새로 넣는다 (중복 등록 방지)."""
+    """Replace any existing vectors from the same source (prevents double enrollment)."""
     db.delete_voiceprints_from_source(source)
     db.add_voiceprint(speaker_id, vector, source=source, speech_sec=speech_sec)
