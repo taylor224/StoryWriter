@@ -25,7 +25,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Speaker-Aware Voice Recorder", lifespan=lifespan)
+app = FastAPI(title="Speaker-Aware Speech To Text for ChatGPT/Claude", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 

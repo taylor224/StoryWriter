@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title StoryWriter - Speaker-Aware Voice Recorder
+title StoryWriter - Speaker-Aware Speech To Text for ChatGPT/Claude
 
 if not exist ".venv\Scripts\activate.bat" goto setup
 if not exist ".env" goto setup

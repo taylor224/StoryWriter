@@ -11,7 +11,7 @@ REM ---------------------------------------------------------------
 
 echo.
 echo ============================================================
-echo   StoryWriter - Speaker-Aware Voice Recorder  installer
+echo   StoryWriter - Speaker-Aware Speech To Text for ChatGPT/Claude  installer
 echo ============================================================
 echo.
 echo This downloads roughly 3-5GB and needs an internet connection.

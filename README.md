@@ -1,8 +1,16 @@
-# Speaker-Aware Voice Recorder
+# Speaker-Aware Speech To Text for ChatGPT/Claude
 
-A local (Windows + NVIDIA GPU) speech-to-text web service. Upload an audio file
-and it writes down **who said what** — and once you name a speaker, they are
-**recognized automatically in every later file**.
+**Turn everything you say and hear into an archive you can ask questions about.**
+
+Meetings, calls, lectures, interviews, notes you talk to yourself — record them,
+drop them in, and the text piles up in `data\results\`. Hand that folder to Claude
+or ChatGPT and you have a personal archive that answers questions instead of a
+folder you never open again.
+
+The part that makes it work is **who said what.** A wall of undifferentiated text
+cannot answer "what did Alex commit to?". This runs locally (Windows + NVIDIA GPU),
+separates speakers, and once you name someone they are **recognized automatically
+in every later file**.
 
 ```
 Alex Kim : Hi everyone, let's get started.
@@ -11,8 +19,62 @@ Speaker A : Go ahead.
 Speaker B : Thanks. 안녕하세요, 반갑습니다.
 ```
 
-Pile the transcripts into Claude or ChatGPT and you get a searchable personal
-archive — [Record and search your life](#record-and-search-your-life)
+Then ask:
+
+```
+Summarize the decisions from this meeting as a table with owners and deadlines.
+
+Find every mention of "pricing policy" across the last three months,
+in chronological order, and tell me how the position changed.
+
+Collect everything Alex agreed to do, and keep only the items with no
+mention of completion yet.
+
+Was anything deferred last week that also went untouched this week?
+
+Pick the three topics I repeated most in this month's meetings.
+```
+
+Especially useful for weekly retros, handover documents and project histories.
+
+---
+
+## Building the archive
+
+### 1. Accumulate
+
+`<name>.txt` is already in a paste-friendly shape. The speaker name is on the front
+of every line, so the LLM keeps track of who said what.
+
+| Service | How |
+|---|---|
+| **Claude** | Create a [Project](https://claude.ai/projects) and keep adding the txt files to its knowledge. Every conversation inside that project can see everything you have accumulated |
+| **ChatGPT** | Upload the files to a Project, or attach them to a conversation |
+
+The default result name is the date (`2026-08-10`), so chronological order comes
+for free. Naming them **date + title** (`2026-08-10 team sprint retro`) makes them
+far easier to find later.
+
+### 2. Name your speakers
+
+This is the step that decides whether the archive is worth anything. Left as
+`Speaker A`, nothing can answer "what did Alex say about this?".
+
+You only do it once per person. Type a name on the result page and that voice is
+enrolled — **every file after that labels them automatically**, with no
+re-transcription. See [Enrolling speakers](#enrolling-speakers-the-important-part).
+
+### 3. Before you upload anything
+
+**Meeting transcripts contain names, contact details, contract terms and
+unreleased information.** The moment you upload them to an external service they
+are stored on that company's servers, and deleting them later does not undo what
+was already processed.
+
+- Confirm the content is something you are allowed to upload
+- If other people are on the recording, get **consent for both the recording and
+  the external upload**
+- Strip the awkward parts before uploading, or keep sensitive transcripts local only
 
 ---
 
@@ -443,63 +505,6 @@ without re-transcribing anything.
 
 An hour of audio is about 115MB of wav alone, so clear out old files if disk space
 runs short (the txt and json live separately in `data\results\`).
-
----
-
-## Record and search your life
-
-Transcribe-and-forget means you never read them again. Put the text piling up in
-`data\results\` **into Claude or ChatGPT and it becomes a personal archive you can
-search and question.**
-
-Meetings, calls, lectures, interviews, even notes you talk to yourself — all of it works.
-
-### 1. Accumulate
-
-`<name>.txt` is already in a paste-friendly shape. The speaker name is on the front
-of every line, so the LLM keeps track of who said what.
-
-| Service | How |
-|---|---|
-| **Claude** | Create a [Project](https://claude.ai/projects) and keep adding the txt files to its knowledge. Every conversation inside that project can see everything you have accumulated |
-| **ChatGPT** | Upload the files to a Project, or attach them to a conversation |
-
-The default result name is the date (`2026-08-10`), so chronological order comes
-for free. Naming them **date + title** (`2026-08-10 team sprint retro`) makes them
-far easier to find later.
-
-Assigning speaker names (the enrollment feature) sharply improves search quality.
-Left as `Speaker A`, nothing can answer "what did Alex say about this?".
-
-### 2. Ask
-
-```
-Summarize the decisions from this meeting as a table with owners and deadlines.
-
-Find every mention of "pricing policy" across the last three months,
-in chronological order, and tell me how the position changed.
-
-Collect everything Alex agreed to do, and keep only the items with no
-mention of completion yet.
-
-Was anything deferred last week that also went untouched this week?
-
-Pick the three topics I repeated most in this month's meetings.
-```
-
-Especially useful for weekly retros, handover documents and project histories.
-
-### 3. Before you upload anything
-
-**Meeting transcripts contain names, contact details, contract terms and
-unreleased information.** The moment you upload them to an external service they
-are stored on that company's servers, and deleting them later does not undo what
-was already processed.
-
-- Confirm the content is something you are allowed to upload
-- If other people are on the recording, get **consent for both the recording and
-  the external upload**
-- Strip the awkward parts before uploading, or keep sensitive transcripts local only
 
 ---
 
