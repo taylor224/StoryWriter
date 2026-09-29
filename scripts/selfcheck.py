@@ -489,6 +489,33 @@ lines = render.merge_lines(
 check("speakers given the same name join into one line",
       len(lines) == 1 and lines[0]["text"] == "first half second half", str(lines))
 
+# ── WebVTT output ─────────────────────────────────────────────────────
+print("\n── WebVTT output ──")
+check("vtt timestamps carry milliseconds and roll into hours",
+      render.vtt_timestamp(3725.5) == "01:02:05.500", render.vtt_timestamp(3725.5))
+check("vtt timestamps round rather than truncate",
+      render.vtt_timestamp(1.9996) == "00:00:02.000", render.vtt_timestamp(1.9996))
+
+vtt = render.render_vtt(
+    [{"speaker": "SPEAKER_01", "text": "second", "start": 5.0, "end": 6.0},
+     {"speaker": "SPEAKER_00", "text": "a <b> & c --> d\n\ne", "start": 1.25, "end": 3.5},
+     {"speaker": "SPEAKER_00", "text": "   ", "start": 4.0, "end": 4.5},
+     {"speaker": None, "text": "zero length", "start": 7.0, "end": 7.0}],
+    {"SPEAKER_00": "Alex <Kim>", "SPEAKER_01": "Dana Park"},
+)
+blocks = vtt.split("\n\n")
+check("vtt starts with the WEBVTT header", blocks[0] == "WEBVTT", repr(blocks[0]))
+check("vtt has one cue per non-empty segment", len(blocks) == 4, repr(vtt))
+check("vtt cues are sorted by start time",
+      blocks[1].startswith("00:00:01.250 --> 00:00:03.500"), repr(blocks[1]))
+check("vtt escapes markup and never lets '-->' or a blank line into cue text",
+      blocks[1].split("\n")[1] == "<v Alex &lt;Kim&gt;>a &lt;b&gt; &amp; c --&gt; d e",
+      repr(blocks[1]))
+check("vtt names the speaker with a voice tag",
+      blocks[2].split("\n")[1] == "<v Dana Park>second", repr(blocks[2]))
+check("vtt cue end always comes after its start",
+      blocks[3].startswith("00:00:07.000 --> 00:00:07.001"), repr(blocks[3]))
+
 # ── Hallucination filter ──────────────────────────────────────────────
 print("\n── Hallucination filter ──")
 from app import cleanup  # noqa: E402

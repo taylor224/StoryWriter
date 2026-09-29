@@ -237,7 +237,15 @@ def api_clip(name: str, start: float = 0.0, end: float = 0.0):
 
 @app.get("/api/results/{name}/download")
 def api_download(name: str, fmt: str = "txt"):
-    path = render.txt_path(name) if fmt == "txt" else render.json_path(name)
+    paths = {"txt": render.txt_path, "vtt": render.vtt_path, "json": render.json_path}
+    if fmt not in paths:
+        raise HTTPException(400, f"Unsupported format: {fmt}")
+    path = paths[fmt](name)
+    if fmt == "vtt" and not path.exists():
+        # Results saved before vtt output existed only have txt and json
+        payload = render.load(name)
+        if payload is not None:
+            path = render.write_vtt(payload)
     if not path.exists():
         raise HTTPException(404, "File not found.")
     return FileResponse(path, filename=path.name, media_type="application/octet-stream")

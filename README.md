@@ -446,14 +446,14 @@ Uncheck the glossary box and re-run. Batched inference applies the prompt to eve
 That is a hallucination over silence or noise. Trimming the dead air at the start
 and end reduces it.
 
-Results are saved as `data\results\<name>.txt` and `<name>.json`.
+Results are saved as `data\results\<name>.txt`, `<name>.vtt` and `<name>.json`.
 
 ### Enrolling speakers (the important part)
 
 **Option A — from a result (recommended)**
 
 On the result page, type a name next to `Speaker A` under `Assign speakers` and
-save. The voiceprint is enrolled at that moment and the txt is rebuilt.
+save. The voiceprint is enrolled at that moment and the txt and vtt are rebuilt.
 **No re-transcription, about a second.** Every file you upload afterwards shows
 that person by name.
 
@@ -496,15 +496,29 @@ Alex Kim : Hi everyone, let's get started.
 Dana Park : Sounds good.
 ```
 
+**`<name>.vtt`** — WebVTT subtitles on the original clock, one cue per segment,
+with the speaker as a voice tag. Load it next to the original video in a player,
+or keep it when you need the timestamps
+
+```
+WEBVTT
+
+00:00:01.200 --> 00:00:03.850
+<v Alex Kim>Hi everyone, let's get started.
+
+00:00:04.100 --> 00:00:05.000
+<v Dana Park>Sounds good.
+```
+
 **`<name>.json`** — timestamps, word-level alignment, speaker embeddings and the
-raw segments. This file is why **you can rename a speaker and rebuild the txt**
-without re-transcribing anything.
+raw segments. This file is why **you can rename a speaker and rebuild the txt and
+vtt** without re-transcribing anything.
 
 `data\uploads\` keeps both the uploaded original and the converted
 `<name>.16k.wav`. Those are scratch files; deleting them does not affect results.
 
 An hour of audio is about 115MB of wav alone, so clear out old files if disk space
-runs short (the txt and json live separately in `data\results\`).
+runs short (the txt, vtt and json live separately in `data\results\`).
 
 ---
 
@@ -657,7 +671,7 @@ app/
   stitch.py     merging per-chunk speaker labels + re-merging over-split speakers
   cleanup.py    filtering out Whisper hallucinations
   matching.py   cosine similarity matching / enrollment
-  render.py     txt and json output, regeneration, Speaker A/B labelling
+  render.py     txt, vtt and json output, regeneration, Speaker A/B labelling
   pipeline.py   the whole flow + CLI
   jobs.py       single-worker background queue
   main.py       FastAPI routes

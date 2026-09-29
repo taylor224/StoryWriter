@@ -248,7 +248,7 @@ async function refreshResults() {
   container.querySelectorAll("[data-del]").forEach((button) =>
     button.addEventListener("click", async () => {
       const name = button.dataset.del;
-      if (!confirm(`Delete the result '${name}'? Its txt and json files will be removed.`)) return;
+      if (!confirm(`Delete the result '${name}'? Its txt, vtt and json files will be removed.`)) return;
       await api(`/api/results/${encodeURIComponent(name)}`, { method: "DELETE" });
       toast("Deleted");
       refreshResults();

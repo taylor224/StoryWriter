@@ -1,9 +1,11 @@
 """Saving and regenerating results.
 
 data/results/<name>.txt  — the requested format (`Name : text`)
+data/results/<name>.vtt  — WebVTT subtitles, one cue per segment with the
+                           speaker as a <v> voice tag
 data/results/<name>.json — timestamps, embeddings and raw segments. Renaming a
-                           speaker only rebuilds the txt, so nothing is ever
-                           re-transcribed.
+                           speaker only rebuilds the txt and vtt, so nothing is
+                           ever re-transcribed.
 """
 
 import json
@@ -50,6 +52,10 @@ def unique_name(name: str) -> str:
 
 def txt_path(name: str) -> Path:
     return config.RESULT_DIR / f"{sanitize_name(name)}.txt"
+
+
+def vtt_path(name: str) -> Path:
+    return config.RESULT_DIR / f"{sanitize_name(name)}.vtt"
 
 
 def json_path(name: str) -> Path:
@@ -159,11 +165,55 @@ def timestamp(seconds: float) -> str:
     return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
 
 
+def vtt_timestamp(seconds: float) -> str:
+    """3725.5 -> 01:02:05.500 (hours keep growing past 99, as WebVTT allows)"""
+    ms = max(0, round(seconds * 1000))
+    total, ms = divmod(ms, 1000)
+    return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}.{ms:03d}"
+
+
+def _vtt_escape(text: str) -> str:
+    # Also keeps "-->" out of cue text, which would otherwise read as a timing line
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def render_vtt(
+    segments: list[dict], displays: dict[str, str], unknown: str = "Speaker ?"
+) -> str:
+    """One cue per segment rather than per merged line: a line can run for
+    minutes, which is useless as a subtitle."""
+    cues = []
+    for seg in sorted(segments, key=lambda s: float(s.get("start", 0.0) or 0.0)):
+        # A blank line inside cue text would end the cue early
+        text = " ".join((seg.get("text") or "").split())
+        if not text:
+            continue
+        label = seg.get("speaker")
+        name = " ".join((displays.get(label, unknown) if label else unknown).split())
+        start = float(seg.get("start", 0.0) or 0.0)
+        # Players drop a cue whose end is not after its start
+        end = max(float(seg.get("end", 0.0) or 0.0), start + 0.001)
+        cues.append(
+            f"{vtt_timestamp(start)} --> {vtt_timestamp(end)}\n"
+            f"<v {_vtt_escape(name)}>{_vtt_escape(text)}\n"
+        )
+    return "WEBVTT\n\n" + "\n".join(cues)
+
+
 # ── File I/O ──────────────────────────────────────────────────────────
+def _displays(payload: dict[str, Any]) -> dict[str, str]:
+    return {label: info["display"] for label, info in payload["speakers"].items()}
+
+
+def write_vtt(payload: dict[str, Any]) -> Path:
+    path = vtt_path(payload["name"])
+    path.write_text(render_vtt(payload["segments"], _displays(payload)), encoding="utf-8")
+    return path
+
+
 def save(payload: dict[str, Any]) -> tuple[Path, Path]:
     name = payload["name"]
-    displays = {label: info["display"] for label, info in payload["speakers"].items()}
-    lines = merge_lines(payload["segments"], displays)
+    lines = merge_lines(payload["segments"], _displays(payload))
     payload["lines"] = lines
 
     jpath, tpath = json_path(name), txt_path(name)
@@ -171,6 +221,7 @@ def save(payload: dict[str, Any]) -> tuple[Path, Path]:
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     tpath.write_text(render_txt(lines), encoding="utf-8")
+    write_vtt(payload)
     return tpath, jpath
 
 
@@ -183,7 +234,7 @@ def load(name: str) -> dict[str, Any] | None:
 
 def delete(name: str) -> bool:
     removed = False
-    for path in (json_path(name), txt_path(name)):
+    for path in (json_path(name), txt_path(name), vtt_path(name)):
         if path.exists():
             path.unlink()
             removed = True
